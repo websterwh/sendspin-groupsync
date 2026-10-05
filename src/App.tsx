@@ -33,12 +33,6 @@ function App() {
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="fixed bottom-0 left-0 right-0 bg-surface border-t border-gray-700 p-2">
-        <p className="text-center text-xs text-text-muted">
-          GroupSync - Sendspin Audio Synchronization
-        </p>
-      </footer>
     </div>
   );
 }

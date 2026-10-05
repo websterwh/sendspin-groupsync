@@ -132,7 +132,7 @@ export function PlayerList() {
         </>
       )}
 
-      <div className="fixed bottom-16 left-0 right-0 p-4 bg-background border-t border-gray-700">
+      <div className="fixed bottom-0 left-0 right-0 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] bg-background border-t border-gray-700">
         <div className="max-w-lg mx-auto flex gap-3">
           <button
             onClick={handleDisconnect}
