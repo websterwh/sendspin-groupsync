@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCalibrationStore, usePlayersStore, useConnectionStore } from '../store';
 import { createCalibrationSession, CalibrationSession } from '../calibration';
+import { analyzeGroups } from '../calibration/grouping';
 import { pushSyncOffsets } from '../sync-push';
 import type { PushResult } from '../sync-push';
 import type { CalibrationResult } from '../types';
@@ -19,15 +20,11 @@ export function CalibrationWizard() {
     .filter((p): p is NonNullable<typeof p> => !!p);
 
   // The track must be played on the sync group's leader so every member plays the same stream
-  const leaderOf = (playerId: string) => {
-    const p = players.find((x) => x.player_id === playerId);
-    return p?.active_group || p?.synced_to || playerId;
-  };
-  const leaders = useMemo(
-    () => Array.from(new Set(selectedPlayers.map((p) => leaderOf(p.player_id)))),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedPlayers.map((p) => p.player_id).join(','), players]
+  const groups = useMemo(
+    () => analyzeGroups(players, selectedPlayerIds),
+    [players, selectedPlayerIds]
   );
+  const leaders = groups.targets;
   const [playOn, setPlayOn] = useState<string>('');
   const playTarget = playOn || leaders[0] || '';
   const nameOf = (id: string) => players.find((p) => p.player_id === id)?.name ?? id;
@@ -246,6 +243,18 @@ export function CalibrationWizard() {
                 Players that aren&apos;t grouped start the track at different times, so the numbers
                 would be meaningless. Group them in Music Assistant first, or choose the group to play on:
               </p>
+              <details className="text-xs text-red-300/70">
+                <summary className="cursor-pointer">What Music Assistant reports</summary>
+                <div className="mt-1 space-y-1 font-mono break-all">
+                  {selectedPlayers.map((p) => (
+                    <div key={p.player_id}>
+                      {p.name} (id {p.player_id}, type {p.type}): synced_to={String(p.synced_to ?? null)},
+                      active_group={String(p.active_group ?? null)}, group_members=
+                      {JSON.stringify(p.group_members ?? null)} &rarr; group #{groups.groupIndex[p.player_id] + 1}
+                    </div>
+                  ))}
+                </div>
+              </details>
               <select
                 value={playTarget}
                 onChange={(e) => setPlayOn(e.target.value)}

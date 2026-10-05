@@ -12,6 +12,8 @@ export interface Player {
   muted?: boolean;
   volume_muted?: boolean;
   group_childs?: string[];
+  group_members?: string[];
+  static_group_members?: string[];
   synced_to?: string | null;
   active_group?: string | null;
   can_sync_with?: string[];
