@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCalibrationStore, usePlayersStore, useConnectionStore } from '../store';
 import { createCalibrationSession, CalibrationSession } from '../calibration';
+import type { RoomReading, MeasurementKind } from '../calibration/CalibrationSession';
 import { analyzeGroups } from '../calibration/grouping';
 import { pushSyncOffsets } from '../sync-push';
 import type { PushResult } from '../sync-push';
 import type { CalibrationResult } from '../types';
 
-type RoomState = 'waiting' | 'measuring' | 'done' | 'empty';
-
 export function CalibrationWizard() {
-  const { phase, setPhase, results, setResult, clearResults, updateOffset, setError } =
+  const { phase, setPhase, results, setResult, clearResults, updateOffset, setError, error } =
     useCalibrationStore();
   const { players, selectedPlayerIds, makeReference } = usePlayersStore();
   const { serverUrl } = useConnectionStore();
@@ -30,8 +29,12 @@ export function CalibrationWizard() {
   const nameOf = (id: string) => players.find((p) => p.player_id === id)?.name ?? id;
 
   // Room order: selected order, then the first room again at the end to measure clock drift
-  const [roomStates, setRoomStates] = useState<Record<string, RoomState>>({});
+  // Latest reading per room (what was heard, relative to the reference); a room is "done" once it has one
+  const [readings, setReadings] = useState<Record<string, RoomReading>>({});
   const [closingDone, setClosingDone] = useState(false);
+  // Which measurement is in progress ('closing' = the reference room's drift check), and the last outcome
+  const [measuringId, setMeasuringId] = useState<string | null>(null);
+  const [lastOutcome, setLastOutcome] = useState<{ id: string; clicks: number } | null>(null);
   const [measuringLeft, setMeasuringLeft] = useState(0);
   const [measuringName, setMeasuringName] = useState('');
   const [live, setLive] = useState({ total: 0, level: 0, timedOut: false, remaining: 0 });
@@ -64,15 +67,17 @@ export function CalibrationWizard() {
   }, []);
 
   const firstRoom = selectedPlayers[0];
-  const allRoomsDone =
-    selectedPlayers.length > 0 && selectedPlayers.every((p) => roomStates[p.player_id] === 'done');
-  const nextRoom = selectedPlayers.find((p) => roomStates[p.player_id] !== 'done');
-  const measuring = selectedPlayers.some((p) => roomStates[p.player_id] === 'measuring') || measuringLeft > 0;
+  const isDone = (id: string) => (readings[id]?.clicks ?? 0) > 0;
+  const allRoomsDone = selectedPlayers.length > 0 && selectedPlayers.every((p) => isDone(p.player_id));
+  const nextRoom = selectedPlayers.find((p) => !isDone(p.player_id));
+  const measuring = measuringId !== null;
 
   const handleStart = async () => {
     if (!firstRoom || !playTarget) return;
     setError(null);
-    setRoomStates({});
+    setReadings({});
+    setMeasuringId(null);
+    setLastOutcome(null);
     setMuteProblems([]);
     setClosingDone(false);
     setPlaying(false);
@@ -98,13 +103,17 @@ export function CalibrationWizard() {
             break;
           }
           case 'room_measured': {
-            const d = event.data as { playerId: string; clicks: number };
-            if (d.clicks === 0) sessionRef.current?.discardLastMeasurement();
-            if (d.playerId === firstRoom.player_id && roomStatesRef.current[d.playerId] === 'done') {
-              setClosingDone(d.clicks > 0);
-            } else {
-              setRoomStates((prev) => ({ ...prev, [d.playerId]: d.clicks > 0 ? 'done' : 'empty' }));
-            }
+            const d = event.data as {
+              playerId: string;
+              kind: MeasurementKind;
+              clicks: number;
+              readings: RoomReading[];
+            };
+            // A measurement that heard nothing never replaces an earlier good one
+            setReadings(Object.fromEntries(d.readings.map((r) => [r.playerId, r])));
+            if (d.kind === 'closing' && d.clicks > 0) setClosingDone(true);
+            setLastOutcome({ id: d.kind === 'closing' ? 'closing' : d.playerId, clicks: d.clicks });
+            setMeasuringId(null);
             setMeasuringLeft(0);
             break;
           }
@@ -144,32 +153,15 @@ export function CalibrationWizard() {
     }
   };
 
-  // The room_measured handler needs the latest room states without re-creating the session callback
-  const roomStatesRef = useRef(roomStates);
-  roomStatesRef.current = roomStates;
-
-  const handleMeasure = (playerId: string) => {
+  // Measure (or re-measure) a room; the reference room's closing check uses kind 'closing'
+  const startMeasurement = (playerId: string, kind: MeasurementKind) => {
     const session = sessionRef.current;
     if (!session || measuring) return;
     setMeasuringName(nameOf(playerId));
-    setRoomStates((prev) => ({ ...prev, [playerId]: 'measuring' }));
+    setMeasuringId(kind === 'closing' ? 'closing' : playerId);
+    setLastOutcome(null);
     setMeasuringLeft(session.windowSeconds + 3);
-    session.measureRoom(playerId);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-    countdownRef.current = setInterval(() => {
-      setMeasuringLeft((n) => {
-        if (n <= 1 && countdownRef.current) clearInterval(countdownRef.current);
-        return Math.max(0, n - 1);
-      });
-    }, 1000);
-  };
-
-  const handleMeasureClosing = () => {
-    const session = sessionRef.current;
-    if (!session || !firstRoom || measuring) return;
-    setMeasuringName(firstRoom.name);
-    setMeasuringLeft(session.windowSeconds + 3);
-    session.measureRoom(firstRoom.player_id);
+    void session.measureRoom(playerId, kind);
     if (countdownRef.current) clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
       setMeasuringLeft((n) => {
@@ -212,11 +204,12 @@ export function CalibrationWizard() {
     }
   };
 
-  const roomButtonLabel = (state: RoomState | undefined) =>
-    state === 'done' ? 'Measured' : state === 'empty' ? 'Heard nothing - retry' : 'Measure here';
-
   return (
     <div className="space-y-6 pb-20">
+      {error && (
+        <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-red-300 text-sm">{error}</div>
+      )}
+
       {/* Instructions Phase */}
       {phase === 'instructions' && (
         <>
@@ -398,44 +391,80 @@ export function CalibrationWizard() {
 
           <div className="space-y-2">
             {selectedPlayers.map((player, i) => {
-              const state = roomStates[player.player_id];
-              const isMeasuring = state === 'measuring';
+              const reading = readings[player.player_id];
+              const done = (reading?.clicks ?? 0) > 0;
+              const isMeasuring = measuringId === player.player_id;
+              const heardNothing = lastOutcome?.id === player.player_id && lastOutcome.clicks === 0;
+              const warnings = reading?.warnings ?? [];
               return (
-                <div key={player.player_id} className="flex items-center gap-3 p-3 bg-surface rounded-lg">
-                  <div className="text-xl">{state === 'done' ? '✅' : isMeasuring ? '⏺' : '🔊'}</div>
-                  <div className="flex-1">
-                    <div className="font-medium">{player.name}</div>
-                    <div className="text-xs text-text-muted">
-                      {[i === 0 ? 'Reference room' : '', player.player_id === playTarget ? 'Group leader' : '']
-                        .filter(Boolean)
-                        .join(' · ')}
+                <div key={player.player_id} className="p-3 bg-surface rounded-lg space-y-2">
+                  <div className="flex items-center gap-3">
+                    <div className="text-xl">{done ? (warnings.length ? '⚠️' : '✅') : isMeasuring ? '⏺' : '🔊'}</div>
+                    <div className="flex-1">
+                      <div className="font-medium">{player.name}</div>
+                      <div className="text-xs text-text-muted">
+                        {[i === 0 ? 'Reference room' : '', player.player_id === playTarget ? 'Group leader' : '']
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
                     </div>
+                    <button
+                      onClick={() => startMeasurement(player.player_id, 'primary')}
+                      disabled={!playing || live.total === 0 || measuring}
+                      className="px-3 py-2 bg-primary hover:bg-primary-dark disabled:opacity-40 rounded text-sm"
+                    >
+                      {isMeasuring ? `Hold still ${measuringLeft}s` : done ? 'Measure again' : 'Measure here'}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => handleMeasure(player.player_id)}
-                    disabled={!playing || live.total === 0 || measuring || state === 'done'}
-                    className="px-3 py-2 bg-primary hover:bg-primary-dark disabled:opacity-40 rounded text-sm"
-                  >
-                    {isMeasuring ? `Hold still ${measuringLeft}s` : roomButtonLabel(state)}
-                  </button>
+                  {done && (
+                    <div className="text-xs text-text-muted font-mono">
+                      {i === 0
+                        ? 'baseline'
+                        : reading.arrivalMs === null
+                          ? 'measure the reference room first'
+                          : `${reading.arrivalMs > 0 ? '+' : ''}${reading.arrivalMs.toFixed(1)} ms vs reference`}
+                      {' · '}
+                      {reading.clicks} clicks
+                      {reading.spreadMs !== null && ` · ±${reading.spreadMs.toFixed(1)} ms`}
+                    </div>
+                  )}
+                  {warnings.length > 0 && (
+                    <ul className="text-xs text-yellow-300 list-disc list-inside">
+                      {warnings.map((w) => (
+                        <li key={w}>{w}</li>
+                      ))}
+                      <li className="list-none text-yellow-300/70">Tap Measure again to redo this room.</li>
+                    </ul>
+                  )}
+                  {heardNothing && (
+                    <div className="text-xs text-red-300">
+                      Heard nothing that time{done ? ' (the earlier measurement was kept)' : ''}. Move closer to this
+                      speaker, check it isn&apos;t muted or paused, and try again.
+                    </div>
+                  )}
                 </div>
               );
             })}
 
             {firstRoom && selectedPlayers.length > 1 && (
-              <div className="flex items-center gap-3 p-3 bg-surface rounded-lg">
-                <div className="text-xl">{closingDone ? '✅' : '🔁'}</div>
-                <div className="flex-1">
-                  <div className="font-medium">{firstRoom.name} again</div>
-                  <div className="text-xs text-text-muted">Corrects clock drift (recommended)</div>
+              <div className="p-3 bg-surface rounded-lg space-y-2">
+                <div className="flex items-center gap-3">
+                  <div className="text-xl">{closingDone ? '✅' : '🔁'}</div>
+                  <div className="flex-1">
+                    <div className="font-medium">{firstRoom.name} again</div>
+                    <div className="text-xs text-text-muted">Corrects clock drift (recommended)</div>
+                  </div>
+                  <button
+                    onClick={() => startMeasurement(firstRoom.player_id, 'closing')}
+                    disabled={!allRoomsDone || measuring}
+                    className="px-3 py-2 bg-primary hover:bg-primary-dark disabled:opacity-40 rounded text-sm"
+                  >
+                    {measuringId === 'closing' ? `Hold still ${measuringLeft}s` : closingDone ? 'Measure again' : 'Measure here'}
+                  </button>
                 </div>
-                <button
-                  onClick={handleMeasureClosing}
-                  disabled={!allRoomsDone || measuring || closingDone}
-                  className="px-3 py-2 bg-primary hover:bg-primary-dark disabled:opacity-40 rounded text-sm"
-                >
-                  {closingDone ? 'Measured' : measuring && allRoomsDone ? `Hold still ${measuringLeft}s` : 'Measure here'}
-                </button>
+                {lastOutcome?.id === 'closing' && lastOutcome.clicks === 0 && (
+                  <div className="text-xs text-red-300">Heard nothing that time. Try again.</div>
+                )}
               </div>
             )}
           </div>
@@ -516,6 +545,16 @@ export function CalibrationWizard() {
                     </span>
                     <span>{result.detectedClicks} clicks used</span>
                   </div>
+                  {result.warnings && result.warnings.length > 0 && (
+                    <ul className="text-xs text-yellow-300 list-disc list-inside">
+                      {result.warnings.map((w) => (
+                        <li key={w}>{w}</li>
+                      ))}
+                      <li className="list-none text-yellow-300/70">
+                        Consider measuring this one again before trusting the value.
+                      </li>
+                    </ul>
+                  )}
                   {Math.abs(result.offsetMs) > 500 && (
                     <div className="text-xs text-yellow-300">
                       Outside MA&apos;s ±500 ms range; it will be clamped if pushed.

@@ -9,7 +9,8 @@
 
 interface Chunk {
   frame: number;
-  data: Float32Array;
+  /** 16-bit PCM (half the memory of floats; plenty of range for microphone audio) */
+  data: Int16Array;
 }
 
 const WORKLET_SOURCE = `
@@ -49,7 +50,7 @@ export class MicRecorder {
   gapCount = 0;
 
   /** Maximum recording length (seconds) to bound memory */
-  static readonly MAX_SECONDS = 330;
+  static readonly MAX_SECONDS = 640;
 
   get sampleRate(): number {
     return this.context?.sampleRate ?? 48000;
@@ -89,9 +90,14 @@ export class MicRecorder {
       }
       this.nextFrame = frame + data.length;
       if (this.elapsed > MicRecorder.MAX_SECONDS) return;
-      this.chunks.push({ frame, data });
+      const pcm = new Int16Array(data.length);
       let sum = 0;
-      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      for (let i = 0; i < data.length; i++) {
+        const v = Math.max(-1, Math.min(1, data[i]));
+        pcm[i] = Math.round(v * 32767);
+        sum += v * v;
+      }
+      this.chunks.push({ frame, data: pcm });
       this.lastLevel = Math.sqrt(sum / data.length);
     };
 
@@ -141,7 +147,7 @@ export class MicRecorder {
       if (cEnd <= start || cStart >= end) continue;
       const from = Math.max(start, cStart);
       const to = Math.min(end, cEnd);
-      out.set(c.data.subarray(from - cStart, to - cStart), from - start);
+      for (let i = from; i < to; i++) out[i - start] = c.data[i - cStart] / 32767;
     }
     return out;
   }

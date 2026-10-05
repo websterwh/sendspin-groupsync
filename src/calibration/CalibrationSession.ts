@@ -6,10 +6,14 @@
  * is measured again at the end so clock drift can be removed. All rooms are
  * compared inside the same recording on the same track timeline, so the
  * (unknown) delay between "play" and sound cancels out. See ClickAnalyzer.
+ *
+ * Any room can be re-measured at any time; a new measurement only replaces the
+ * old one if it actually heard clicks.
  */
 
 import { MicRecorder } from './MicRecorder';
-import { analyzeRooms, detectClicks } from './ClickAnalyzer';
+import { analyzeRooms, detectClicks, qualityWarnings, MAX_NORMAL_WIDTH_MS } from './ClickAnalyzer';
+import type { DetectedClick, RoomAnalysis } from './ClickAnalyzer';
 import type { CalibrationConfig, CalibrationResult } from '../types';
 import { DEFAULT_CALIBRATION_CONFIG } from '../types';
 import { maClient, resolveClickTrackUrl } from '../ma-client';
@@ -37,7 +41,19 @@ export interface CalibrationEvent {
   data?: unknown;
 }
 
+/** What was heard in one room, available right after it is measured */
+export interface RoomReading {
+  playerId: string;
+  clicks: number;
+  /** Arrival relative to the reference room (ms); null if it can't be computed yet */
+  arrivalMs: number | null;
+  spreadMs: number | null;
+  warnings: string[];
+}
+
 type CalibrationEventCallback = (event: CalibrationEvent) => void;
+
+export type MeasurementKind = 'primary' | 'closing';
 
 /** Seconds of settling time after the other players are muted before clicks count */
 const GUARD_S = 1.5;
@@ -45,11 +61,12 @@ const GUARD_S = 1.5;
 const WINDOW_S = 10;
 /** Sendspin/MA can take a while to start the stream; give up waiting after this */
 const HEAR_TIMEOUT_S = 40;
-
 interface Measurement {
   playerId: string;
+  kind: MeasurementKind;
   startTime: number;
   endTime: number;
+  clicks: DetectedClick[];
 }
 
 export class CalibrationSession {
@@ -88,12 +105,11 @@ export class CalibrationSession {
   }
 
   /**
-   * Track length: up to ~30 s for playback to start, then per room (plus the closing
-   * check on the first room) about 12 s of measuring and ~13 s of walking.
+   * Track length. It doesn't have to play in full (it stops at Finish), so be generous:
+   * room for startup, every room plus the closing check, and several retries.
    */
   get trackSeconds(): number {
-    const perRoom = WINDOW_S + GUARD_S + 12;
-    return Math.min(300, Math.max(60, Math.round(30 + (this.rooms.length + 1) * perRoom)));
+    return Math.min(600, 120 + (this.rooms.length + 1) * 75);
   }
 
   get windowSeconds(): number {
@@ -135,12 +151,13 @@ export class CalibrationSession {
    * Begin the measurement window for a room (the user is standing there now).
    * Every other room is muted for the window so only this player is heard
    * (speakers sharing a room play the same clicks and can't be told apart),
-   * then mute states are restored.
+   * then mute states are restored. Measuring a room again replaces the earlier
+   * sample, but only if the new one heard clicks.
    */
-  async measureRoom(playerId: string): Promise<void> {
+  async measureRoom(playerId: string, kind: MeasurementKind = 'primary'): Promise<void> {
     if (!this.isRunning || this.windowTimer || this.measuring) return;
     this.measuring = true;
-    this.emit({ type: 'room_measuring', data: { playerId, seconds: GUARD_S + WINDOW_S } });
+    this.emit({ type: 'room_measuring', data: { playerId, kind, seconds: GUARD_S + WINDOW_S } });
 
     await this.applyMutes(playerId);
     if (!this.isRunning) {
@@ -151,14 +168,126 @@ export class CalibrationSession {
 
     const startTime = this.recorder.elapsed + GUARD_S;
     const endTime = startTime + WINDOW_S;
-    this.measurements.push({ playerId, startTime, endTime });
     this.windowTimer = setTimeout(async () => {
       this.windowTimer = null;
-      const clicks = this.countClicks(startTime, endTime);
       await this.restoreMutes();
+      const samples = this.recorder.getSamples(startTime - 0.3, endTime + 0.3);
+      const clicks = detectClicks(samples, this.recorder.sampleRate, this.config.frequencies, startTime - 0.3).filter(
+        (c) => c.time >= startTime && c.time <= endTime
+      );
+      if (clicks.length > 0) {
+        this.measurements = this.measurements.filter((m) => !(m.playerId === playerId && m.kind === kind));
+        this.measurements.push({ playerId, kind, startTime, endTime, clicks });
+      }
       this.measuring = false;
-      this.emit({ type: 'room_measured', data: { playerId, clicks } });
+      this.emit({
+        type: 'room_measured',
+        data: { playerId, kind, clicks: clicks.length, readings: this.readings() },
+      });
     }, (GUARD_S + WINDOW_S) * 1000 + 300);
+  }
+
+  getLevel(): number {
+    return this.recorder.level;
+  }
+
+  /** Seconds of recording left before the track (or buffer) runs out */
+  get remainingSeconds(): number {
+    return Math.max(0, Math.min(this.trackSeconds, MicRecorder.MAX_SECONDS) - this.recorder.elapsed);
+  }
+
+  /** Combine everything measured so far into the final per-room results. */
+  async finish(): Promise<void> {
+    if (!this.isRunning) return;
+    this.stopTimers();
+    this.emit({ type: 'analyzing' });
+    // Let the UI paint the spinner before the analysis
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    try {
+      await this.stopPlayback();
+      const analysis = this.analyze();
+      console.log('[CalibrationSession] Analysis:', analysis);
+
+      const arrivals = analysis.rooms
+        .map((room) => room.arrivalMs)
+        .filter((v): v is number => v !== null);
+      const latest = arrivals.length > 0 ? Math.max(...arrivals) : 0;
+
+      const results: CalibrationResult[] = [];
+      for (const room of analysis.rooms) {
+        const info = this.rooms.find((r) => r.playerId === room.playerId);
+        const current = await maClient.getPlayerSyncAdjust(room.playerId);
+        // What we measured already includes the delay currently set, so the new value is
+        // current + extra delay needed to line up with the latest-arriving room.
+        const extra = room.arrivalMs === null ? 0 : latest - room.arrivalMs;
+        results.push({
+          playerId: room.playerId,
+          playerName: info?.name ?? room.playerId,
+          offsetMs: Math.round((current ?? 0) + extra),
+          arrivalMs: room.arrivalMs ?? undefined,
+          currentSyncAdjustMs: current,
+          spreadMs: room.spreadMs ?? undefined,
+          isReference: room.playerId === this.rooms[0]?.playerId,
+          confidence: this.confidence(room),
+          detectedClicks: room.clicks,
+          totalClicks: WINDOW_S,
+          warnings: qualityWarnings(room),
+        });
+      }
+
+      this.emit({
+        type: 'completed',
+        data: {
+          results,
+          driftPpm: analysis.driftPpm,
+          usableClicks: analysis.usableClicks,
+          audioGaps: this.recorder.gapCount,
+        },
+      });
+    } catch (error) {
+      this.emit({ type: 'error', data: error instanceof Error ? error.message : 'Analysis failed' });
+    } finally {
+      await this.cleanup();
+    }
+  }
+
+  /** Abort without analysing */
+  stop(): void {
+    void this.cleanup();
+  }
+
+  // ==================== Private Methods ====================
+
+  private analyze() {
+    const referenceId = this.rooms[0]?.playerId ?? '';
+    return analyzeRooms(
+      this.measurements.flatMap((m) => m.clicks),
+      this.measurements.map(({ playerId, kind, startTime, endTime }) => ({ playerId, kind, startTime, endTime })),
+      referenceId,
+      this.config.frequencies.length,
+      this.config.clickIntervalMs / 1000
+    );
+  }
+
+  /** Current reading for every room measured so far (relative to the reference once it exists) */
+  private readings(): RoomReading[] {
+    const analysis = this.analyze();
+    return analysis.rooms.map((room) => ({
+      playerId: room.playerId,
+      clicks: room.clicks,
+      arrivalMs: room.arrivalMs,
+      spreadMs: room.spreadMs,
+      warnings: qualityWarnings(room),
+    }));
+  }
+
+  private confidence(room: RoomAnalysis): number {
+    if (room.clicks === 0 || room.spreadMs === null) return 0;
+    const countScore = Math.min(1, room.clicks / 8);
+    const spreadScore = Math.max(0, 1 - room.spreadMs / 5);
+    const shapePenalty = room.widthMs !== null && room.widthMs > MAX_NORMAL_WIDTH_MS ? 0.5 : 1;
+    return Math.round(countScore * spreadScore * shapePenalty * 100) / 100;
   }
 
   /** Mute everyone except `playerId` (which is unmuted so it can be heard), then verify it took effect. */
@@ -222,122 +351,6 @@ export class CalibrationSession {
         }
       })
     );
-  }
-
-  /** Discard the last measurement (e.g. it heard nothing) so the room can be retried. */
-  discardLastMeasurement(): void {
-    if (this.windowTimer) {
-      clearTimeout(this.windowTimer);
-      this.windowTimer = null;
-    }
-    this.measurements.pop();
-    this.measuring = false;
-    void this.restoreMutes();
-  }
-
-  getLevel(): number {
-    return this.recorder.level;
-  }
-
-  /** Seconds of recording left before the track (or buffer) runs out */
-  get remainingSeconds(): number {
-    return Math.max(0, Math.min(this.trackSeconds, MicRecorder.MAX_SECONDS) - this.recorder.elapsed);
-  }
-
-  /** Analyse the whole recording and emit the per-room results. */
-  async finish(): Promise<void> {
-    if (!this.isRunning) return;
-    this.stopTimers();
-    this.emit({ type: 'analyzing' });
-    // Let the UI paint the spinner before the heavy synchronous analysis
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    try {
-      const sr = this.recorder.sampleRate;
-      const samples = this.recorder.getSamples(0, this.recorder.elapsed);
-      await this.stopPlayback();
-
-      const intervalS = this.config.clickIntervalMs / 1000;
-      const clicks = detectClicks(samples, sr, this.config.frequencies);
-      const analysis = analyzeRooms(
-        clicks,
-        this.measurements,
-        this.config.frequencies.length,
-        intervalS
-      );
-      console.log('[CalibrationSession] Analysis:', analysis);
-
-      // Players measured twice (reference closing check) are reported once, from the first window
-      const seen = new Set<string>();
-      const measured = analysis.rooms
-        .map((room, i) => ({ room, i }))
-        .filter(({ room }) => {
-          if (seen.has(room.playerId)) return false;
-          seen.add(room.playerId);
-          return true;
-        });
-
-      const arrivals = measured
-        .map(({ room }) => room.arrivalMs)
-        .filter((v): v is number => v !== null);
-      const latest = arrivals.length > 0 ? Math.max(...arrivals) : 0;
-
-      const results: CalibrationResult[] = [];
-      for (const { room, i } of measured) {
-        const info = this.rooms.find((r) => r.playerId === room.playerId);
-        const current = await maClient.getPlayerSyncAdjust(room.playerId);
-        // What we measured already includes the delay currently set, so the new value is
-        // current + extra delay needed to line up with the latest-arriving room.
-        const extra = room.arrivalMs === null ? 0 : latest - room.arrivalMs;
-        const suggested = Math.round((current ?? 0) + extra);
-        results.push({
-          playerId: room.playerId,
-          playerName: info?.name ?? room.playerId,
-          offsetMs: suggested,
-          arrivalMs: room.arrivalMs ?? undefined,
-          currentSyncAdjustMs: current,
-          spreadMs: room.spreadMs ?? undefined,
-          isReference: i === 0,
-          confidence: this.confidence(room.clicks, room.spreadMs),
-          detectedClicks: room.clicks,
-          totalClicks: WINDOW_S,
-        });
-      }
-
-      this.emit({
-        type: 'completed',
-        data: {
-          results,
-          driftPpm: analysis.driftPpm,
-          usableClicks: analysis.usableClicks,
-          audioGaps: this.recorder.gapCount,
-        },
-      });
-    } catch (error) {
-      this.emit({ type: 'error', data: error instanceof Error ? error.message : 'Analysis failed' });
-    } finally {
-      await this.cleanup();
-    }
-  }
-
-  /** Abort without analysing */
-  stop(): void {
-    void this.cleanup();
-  }
-
-  // ==================== Private Methods ====================
-
-  private confidence(clicks: number, spreadMs: number | null): number {
-    if (clicks === 0 || spreadMs === null) return 0;
-    const countScore = Math.min(1, clicks / 8);
-    const spreadScore = Math.max(0, 1 - spreadMs / 5);
-    return Math.round(countScore * spreadScore * 100) / 100;
-  }
-
-  /** Clicks heard in a time range of the recording (for the "did it hear anything" check) */
-  private countClicks(fromS: number, toS: number): number {
-    const samples = this.recorder.getSamples(fromS, toS);
-    return detectClicks(samples, this.recorder.sampleRate, this.config.frequencies, fromS).length;
   }
 
   /** Once a second, scan the last few seconds so the UI can show clicks arriving. */

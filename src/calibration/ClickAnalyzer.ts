@@ -28,10 +28,16 @@ export interface DetectedClick {
   freqIndex: number;
   /** Peak envelope amplitude */
   strength: number;
+  /** Peak amplitude relative to the noise floor for that frequency */
+  snr: number;
+  /** Width of the burst at half its peak (ms). A single speaker gives ~25 ms; two overlapping speakers give more. */
+  widthMs: number;
 }
 
 export interface RoomWindow {
   playerId: string;
+  /** 'primary' = the room's measurement; 'closing' = the reference room measured again to estimate drift */
+  kind: 'primary' | 'closing';
   /** Recording time (s) when the measurement window opens */
   startTime: number;
   /** Recording time (s) when it closes */
@@ -46,6 +52,10 @@ export interface RoomAnalysis {
   arrivalMs: number | null;
   /** Robust spread (scaled MAD) of the per-click values, ms */
   spreadMs: number | null;
+  /** Median click width at half peak (ms); well above ~33 suggests more than one speaker was audible */
+  widthMs: number | null;
+  /** Median signal-to-noise ratio of the clicks */
+  snr: number | null;
 }
 
 export interface AnalysisResult {
@@ -130,8 +140,22 @@ export function detectClicks(
           frac = (half - env[k - 1]) / (env[k] - env[k - 1]);
           k -= 1;
         }
-        const centerSample = (k + frac) * H + W / 2;
-        clicks.push({ time: startTime + centerSample / sampleRate, freqIndex, strength: peak });
+        const riseFrame = k + frac;
+        // Falling edge: first crossing of 50% after the peak
+        let j = peakFrame;
+        while (j < end && env[j] > half) j++;
+        let fallFrame = j;
+        if (j > 0 && j < frames && env[j - 1] > half && env[j] <= half) {
+          fallFrame = j - 1 + (env[j - 1] - half) / (env[j - 1] - env[j]);
+        }
+        const centerSample = riseFrame * H + W / 2;
+        clicks.push({
+          time: startTime + centerSample / sampleRate,
+          freqIndex,
+          strength: peak,
+          snr: peak / Math.max(noise, 1e-6),
+          widthMs: ((fallFrame - riseFrame) * H * 1000) / sampleRate,
+        });
       }
       f = Math.max(end, f + 1);
     }
@@ -169,6 +193,40 @@ interface IndexedClick extends DetectedClick {
   residual: number; // arrival - index * interval (s)
 }
 
+interface Anchor {
+  time: number;
+  index: number;
+}
+
+function wrap(i: number, n: number): number {
+  return ((i % n) + n) % n;
+}
+
+/**
+ * Index of the click in the track that best explains `click`, given an anchor,
+ * restricted to indices with the right frequency. With `maxOffsetS` below half
+ * an interval this is just rounding; above that, the frequency disambiguates
+ * (indices repeat every frequencyCount intervals).
+ */
+function nearestIndex(
+  click: DetectedClick,
+  anchor: Anchor,
+  frequencyCount: number,
+  intervalS: number
+): { index: number; error: number } | null {
+  const base = anchor.index + (click.time - anchor.time) / intervalS;
+  // candidate indices with matching frequency nearest to base
+  const first = Math.floor(base) - frequencyCount;
+  let best: { index: number; error: number } | null = null;
+  for (let i = first; i <= first + 2 * frequencyCount + 1; i++) {
+    if (wrap(i, frequencyCount) !== click.freqIndex) continue;
+    const expected = anchor.time + (i - anchor.index) * intervalS;
+    const error = Math.abs(click.time - expected);
+    if (!best || error < best.error) best = { index: i, error };
+  }
+  return best;
+}
+
 /**
  * Assign each click its index in the track, dropping clicks that don't fit
  * the 1-click-per-interval pattern (noise, claps, speech).
@@ -178,25 +236,27 @@ export function indexClicks(
   frequencyCount: number,
   intervalS: number,
   toleranceS = 0.4
-): IndexedClick[] {
-  if (clicks.length === 0) return [];
+): { clicks: IndexedClick[]; anchor: Anchor | null } {
+  if (clicks.length === 0) return { clicks: [], anchor: null };
 
   let best: IndexedClick[] = [];
-  // Any of the loudest early clicks could be the real anchor; keep the anchor that explains most clicks.
+  let bestAnchor: Anchor | null = null;
+  // Any of the loudest clicks could be the real anchor; keep the anchor that explains most clicks.
   const anchors = [...clicks].sort((a, b) => b.strength - a.strength).slice(0, 8);
 
-  for (const anchor of anchors) {
+  for (const c0 of anchors) {
+    const anchor: Anchor = { time: c0.time, index: c0.freqIndex };
     const candidate: IndexedClick[] = [];
     for (const c of clicks) {
-      const steps = Math.round((c.time - anchor.time) / intervalS);
-      const index = anchor.freqIndex + steps;
-      const expectedTime = anchor.time + steps * intervalS;
-      const freqOk = ((index % frequencyCount) + frequencyCount) % frequencyCount === c.freqIndex;
-      if (freqOk && Math.abs(c.time - expectedTime) <= toleranceS) {
-        candidate.push({ ...c, index, residual: c.time - index * intervalS });
+      const m = nearestIndex(c, anchor, frequencyCount, intervalS);
+      if (m && m.error <= toleranceS) {
+        candidate.push({ ...c, index: m.index, residual: c.time - m.index * intervalS });
       }
     }
-    if (candidate.length > best.length) best = candidate;
+    if (candidate.length > best.length) {
+      best = candidate;
+      bestAnchor = anchor;
+    }
   }
 
   // Remove clicks whose residual is far from the bulk (a different index with the same freq)
@@ -204,56 +264,92 @@ export function indexClicks(
     const med = median(best.map((c) => c.residual));
     best = best.filter((c) => Math.abs(c.residual - med) <= toleranceS);
   }
-  return best;
+  return { clicks: best, anchor: bestAnchor };
+}
+
+interface WindowStats {
+  win: RoomWindow;
+  n: number;
+  med: number;
+  spread: number;
+  meanTime: number;
+  width: number;
+  snr: number;
 }
 
 /**
  * Combine detected clicks and measurement windows into per-room offsets.
- * Windows are in measurement order; the first window is the reference. If a
- * later window uses the same player as the first, it is used to remove drift.
+ * The reference room's primary window is the baseline. A closing window on the
+ * reference room, if present, is used to remove linear clock drift.
  */
 export function analyzeRooms(
   clicks: DetectedClick[],
   windows: RoomWindow[],
+  referenceId: string,
   frequencyCount: number,
   intervalS: number
 ): AnalysisResult {
-  const indexed = indexClicks(clicks, frequencyCount, intervalS);
+  const { clicks: indexed, anchor } = indexClicks(clicks, frequencyCount, intervalS);
+  // indexClicks copies clicks, so identify them by their (unique) arrival time
+  const indexedTimes = new Set(indexed.map((c) => c.time));
 
-  const stats = windows.map((win) => {
-    const inside = indexed.filter((c) => c.time >= win.startTime && c.time <= win.endTime);
+  const statsFor = (win: RoomWindow): WindowStats => {
+    const inWin = (c: DetectedClick) => c.time >= win.startTime && c.time <= win.endTime;
+    let inside: IndexedClick[] = indexed.filter(inWin);
+
+    // A room offset by more than half an interval gets mis-indexed by plain rounding. If this window
+    // has few clicks, retry using each click's frequency to pick its index, and accept the result
+    // only if the per-click values agree tightly (random noise can't do that by chance).
+    if (inside.length < 4 && anchor) {
+      const raw = clicks.filter((c) => inWin(c) && !indexedTimes.has(c.time));
+      const wide: IndexedClick[] = [];
+      for (const c of raw) {
+        const m = nearestIndex(c, anchor, frequencyCount, intervalS);
+        if (m && m.error < (intervalS * frequencyCount) / 2) {
+          wide.push({ ...c, index: m.index, residual: c.time - m.index * intervalS });
+        }
+      }
+      if (wide.length >= 4) {
+        const res = wide.map((c) => c.residual);
+        if (mad(res, median(res)) < 0.003) inside = wide;
+      }
+    }
+
     if (inside.length === 0) {
-      return { win, n: 0, med: NaN, spread: NaN, meanTime: NaN };
+      return { win, n: 0, med: NaN, spread: NaN, meanTime: NaN, width: NaN, snr: NaN };
     }
     const res = inside.map((c) => c.residual);
     const med = median(res);
     // Drop outliers beyond 3 sigma of the robust spread (min 1 ms so tight data isn't over-trimmed)
     const sigma = Math.max(mad(res, med), 0.001);
-    const trimmed = res.filter((r) => Math.abs(r - med) <= 3 * sigma);
+    const kept = inside.filter((c) => Math.abs(c.residual - med) <= 3 * sigma);
+    const trimmed = kept.map((c) => c.residual);
     const tMed = median(trimmed);
     return {
       win,
-      n: trimmed.length,
+      n: kept.length,
       med: tMed,
       spread: mad(trimmed, tMed),
-      meanTime: inside.reduce((s, c) => s + c.time, 0) / inside.length,
+      meanTime: kept.reduce((sum, c) => sum + c.time, 0) / kept.length,
+      width: median(kept.map((c) => c.widthMs)),
+      snr: median(kept.map((c) => c.snr)),
     };
-  });
+  };
 
-  const ref = stats[0];
+  const primaries = windows.filter((w) => w.kind === 'primary').map(statsFor);
+  const closing = windows.filter((w) => w.kind === 'closing').map(statsFor).find((s) => s.n > 0);
+  const ref = primaries.find((s) => s.win.playerId === referenceId && s.n > 0);
+
   let slope = 0; // seconds of residual drift per second of recording
   let driftPpm: number | null = null;
-  if (ref && ref.n > 0) {
-    const closing = stats.slice(1).find((s) => s.win.playerId === ref.win.playerId && s.n > 0);
-    if (closing && closing.meanTime - ref.meanTime > 5) {
-      slope = (closing.med - ref.med) / (closing.meanTime - ref.meanTime);
-      driftPpm = slope * 1e6;
-    }
+  if (ref && closing && Math.abs(closing.meanTime - ref.meanTime) > 5) {
+    slope = (closing.med - ref.med) / (closing.meanTime - ref.meanTime);
+    driftPpm = slope * 1e6;
   }
 
-  const rooms: RoomAnalysis[] = stats.map((s) => {
-    if (s.n === 0 || !ref || ref.n === 0) {
-      return { playerId: s.win.playerId, clicks: 0, arrivalMs: null, spreadMs: null };
+  const rooms: RoomAnalysis[] = primaries.map((s) => {
+    if (s.n === 0 || !ref) {
+      return { playerId: s.win.playerId, clicks: 0, arrivalMs: null, spreadMs: null, widthMs: null, snr: null };
     }
     const corrected = s.med - slope * (s.meanTime - ref.meanTime);
     return {
@@ -261,8 +357,28 @@ export function analyzeRooms(
       clicks: s.n,
       arrivalMs: (corrected - ref.med) * 1000,
       spreadMs: s.spread * 1000,
+      widthMs: s.width,
+      snr: s.snr,
     };
   });
 
   return { rooms, driftPpm, usableClicks: indexed.length };
+}
+
+/** A single speaker's click is ~25 ms wide at half height; much wider means overlapping sources */
+export const MAX_NORMAL_WIDTH_MS = 33;
+
+/** Human-readable problems with a measurement */
+export function qualityWarnings(room: RoomAnalysis): string[] {
+  const warnings: string[] = [];
+  if (room.clicks === 0) return ['No usable clicks heard'];
+  if (room.clicks < 6) warnings.push(`Only ${room.clicks} usable clicks (aim for 8+)`);
+  if (room.spreadMs !== null && room.spreadMs > 3) {
+    warnings.push(`Unsteady (±${room.spreadMs.toFixed(1)} ms between clicks)`);
+  }
+  if (room.widthMs !== null && room.widthMs > MAX_NORMAL_WIDTH_MS) {
+    warnings.push('Clicks look smeared: more than one speaker may be audible here. Move closer to this speaker.');
+  }
+  if (room.snr !== null && room.snr < 15) warnings.push('Weak signal: move closer or raise the volume');
+  return warnings;
 }

@@ -10,6 +10,9 @@ export default defineConfig({
   server: {
     host: true,   // Allow mobile access on local network
     port: 5173,
+    // GroupSync saves the MA token/address to .env.local at runtime; Vite would otherwise restart the
+    // dev server (dropping every connection) whenever that file changes.
+    watch: { ignored: ['**/.env.local'] },
     // HTTPS enabled by basicSsl plugin for microphone access on mobile
   },
 })

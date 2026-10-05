@@ -30,6 +30,8 @@ export interface CalibrationResult {
   /** Spread of the individual click measurements, ms */
   spreadMs?: number;
   isReference?: boolean;
+  /** Quality problems with this measurement (few clicks, unsteady, possibly two speakers audible, ...) */
+  warnings?: string[];
   confidence: number;
   detectedClicks: number;
   totalClicks: number;

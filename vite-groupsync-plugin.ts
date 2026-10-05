@@ -22,7 +22,7 @@ import { DEFAULT_CALIBRATION_CONFIG } from './src/types/calibration';
 
 const MEDIA_PORT = Number(process.env.GROUPSYNC_MEDIA_PORT ?? 5174);
 const TRACK_NAME = 'calibration-clicks.wav';
-const MAX_TRACK_SECONDS = 300;
+const MAX_TRACK_SECONDS = 600;
 const TRACK_RATE = 48000;
 const CLICK_MS = 50;
 const CLICK_AMPLITUDE = 0.8;
@@ -64,7 +64,8 @@ function writeEnvValue(root: string, key: string, value: string | null): void {
   }
   const lines = content.split('\n').filter((l) => l && !l.startsWith(`${key}=`));
   if (value) lines.push(`${key}=${value}`);
-  fs.writeFileSync(file, lines.join('\n') + (lines.length ? '\n' : ''), { mode: 0o600 });
+  const next = lines.join('\n') + (lines.length ? '\n' : '');
+  if (next !== content) fs.writeFileSync(file, next, { mode: 0o600 });
 }
 
 
