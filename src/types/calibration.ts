@@ -21,7 +21,15 @@ export interface ClickDetection {
 export interface CalibrationResult {
   playerId: string;
   playerName: string;
+  /** Suggested sync delay to enter for this player (ms, editable by the user) */
   offsetMs: number;
+  /** How much later (+) or earlier (-) this room's sound arrives than the reference room, ms */
+  arrivalMs?: number;
+  /** sync_adjust currently set in Music Assistant, if it could be read */
+  currentSyncAdjustMs?: number | null;
+  /** Spread of the individual click measurements, ms */
+  spreadMs?: number;
+  isReference?: boolean;
   confidence: number;
   detectedClicks: number;
   totalClicks: number;
@@ -37,14 +45,14 @@ export interface CalibrationState {
 
 export interface CalibrationConfig {
   clickIntervalMs: number;    // Time between clicks (default: 1000ms)
-  totalClicks: number;        // Number of clicks in track (default: 20)
+  totalClicks: number;        // Clicks in the track (default: 300, i.e. 5 minutes)
   frequencies: number[];      // Click frequencies (default: [1000, 2000, 4000, 8000])
   sampleRate: number;         // Audio sample rate (default: 48000)
 }
 
 export const DEFAULT_CALIBRATION_CONFIG: CalibrationConfig = {
   clickIntervalMs: 1000,
-  totalClicks: 20,
+  totalClicks: 300,
   // Frequencies optimized for smartphone mic sensitivity (sweet spots: 500, 1k, 2k, 3k Hz)
   frequencies: [500, 1000, 2000, 3000],
   sampleRate: 48000,

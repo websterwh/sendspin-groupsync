@@ -12,15 +12,52 @@
  *    the http:// URL (using this machine's LAN IP on MA's subnet).
  */
 import http from 'node:http';
-import fs from 'node:fs';
 import os from 'node:os';
-import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { Plugin } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
+import { DEFAULT_CALIBRATION_CONFIG } from './src/types/calibration';
 
 const MEDIA_PORT = Number(process.env.GROUPSYNC_MEDIA_PORT ?? 5174);
 const TRACK_NAME = 'calibration-clicks.wav';
+const TRACK_SECONDS = 300;
+const TRACK_RATE = 48000;
+const CLICK_MS = 50;
+const CLICK_AMPLITUDE = 0.8;
+
+let cachedTrack: Buffer | null = null;
+
+/** Mono 16-bit click track: one 50 ms Hann-windowed tone burst per interval, cycling frequencies. */
+function buildTrack(): Buffer {
+  if (cachedTrack) return cachedTrack;
+  const { frequencies, clickIntervalMs } = DEFAULT_CALIBRATION_CONFIG;
+  const total = TRACK_SECONDS * TRACK_RATE;
+  const clickSamples = Math.floor((CLICK_MS / 1000) * TRACK_RATE);
+  const interval = Math.floor((clickIntervalMs / 1000) * TRACK_RATE);
+  const buf = Buffer.alloc(44 + total * 2);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + total * 2, 4);
+  buf.write('WAVEfmt ', 8);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(TRACK_RATE, 24);
+  buf.writeUInt32LE(TRACK_RATE * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36);
+  buf.writeUInt32LE(total * 2, 40);
+  for (let click = 0; click * interval + clickSamples < total; click++) {
+    const freq = frequencies[click % frequencies.length];
+    for (let i = 0; i < clickSamples; i++) {
+      const env = 0.5 * (1 - Math.cos((2 * Math.PI * i) / clickSamples));
+      const v = CLICK_AMPLITUDE * env * Math.sin((2 * Math.PI * freq * i) / TRACK_RATE);
+      buf.writeInt16LE(Math.round(v * 0x7fff), 44 + (click * interval + i) * 2);
+    }
+  }
+  cachedTrack = buf;
+  return buf;
+}
 
 function lanAddresses(): string[] {
   const out: string[] = [];
@@ -52,7 +89,6 @@ function parseTarget(raw: string | null): { host: string; port: string } | null 
 export function groupSyncPlugin(): Plugin {
   const wss = new WebSocketServer({ noServer: true });
   let mediaServer: http.Server | null = null;
-  let trackPath = '';
 
   const handleUpgrade = (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? '', 'http://localhost');
@@ -107,17 +143,26 @@ export function groupSyncPlugin(): Plugin {
   const startMediaServer = () => {
     if (mediaServer) return;
     mediaServer = http.createServer((req, res) => {
-      if (req.url?.split('?')[0] !== `/${TRACK_NAME}` || !fs.existsSync(trackPath)) {
+      if (req.url?.split('?')[0] !== `/${TRACK_NAME}`) {
         res.statusCode = 404;
         res.end();
         return;
       }
-      const stat = fs.statSync(trackPath);
+      const track = buildTrack();
       res.setHeader('Content-Type', 'audio/wav');
-      res.setHeader('Content-Length', stat.size);
       res.setHeader('Accept-Ranges', 'bytes');
+      const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? '');
+      if (range) {
+        const start = range[1] ? Number(range[1]) : 0;
+        const end = range[2] ? Math.min(Number(range[2]), track.length - 1) : track.length - 1;
+        res.statusCode = 206;
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${track.length}`);
+        res.setHeader('Content-Length', end - start + 1);
+        return req.method === 'HEAD' ? res.end() : res.end(track.subarray(start, end + 1));
+      }
+      res.setHeader('Content-Length', track.length);
       if (req.method === 'HEAD') return res.end();
-      fs.createReadStream(trackPath).pipe(res);
+      res.end(track);
     });
     mediaServer.on('error', (e) => console.warn(`[groupsync] media server on :${MEDIA_PORT} failed:`, e.message));
     mediaServer.listen(MEDIA_PORT, '0.0.0.0', () =>
@@ -128,14 +173,12 @@ export function groupSyncPlugin(): Plugin {
   return {
     name: 'groupsync',
     configureServer(server) {
-      trackPath = path.resolve(server.config.publicDir, TRACK_NAME);
       startMediaServer();
       server.middlewares.use(handleInfo);
       server.httpServer?.on('upgrade', handleUpgrade);
       server.httpServer?.on('close', () => mediaServer?.close());
     },
     configurePreviewServer(server) {
-      trackPath = path.resolve(server.config.root, 'dist', TRACK_NAME);
       startMediaServer();
       server.middlewares.use(handleInfo);
       server.httpServer?.on('upgrade', handleUpgrade);

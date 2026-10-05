@@ -1,26 +1,31 @@
 /**
  * Calibration Session
- * Orchestrates the calibration process for a single speaker
  *
- * Uses NTP-style clock synchronization with the Sendspin server for
- * accurate timing measurements. This allows us to calculate speaker
- * offset with millisecond precision.
+ * One continuous recording while the whole sync group plays a long click
+ * track. The user walks to each room and taps "measure here"; the first room
+ * is measured again at the end so clock drift can be removed. All rooms are
+ * compared inside the same recording on the same track timeline, so the
+ * (unknown) delay between "play" and sound cancels out. See ClickAnalyzer.
  */
 
-import { AudioDetector, createAudioDetector } from './AudioDetector';
-import { ClickTrackGenerator } from './ClickTrackGenerator';
-import { OffsetCalculator } from './OffsetCalculator';
-import type { ClickDetection, CalibrationResult, CalibrationConfig } from '../types';
+import { MicRecorder } from './MicRecorder';
+import { analyzeRooms, detectClicks } from './ClickAnalyzer';
+import type { CalibrationConfig, CalibrationResult } from '../types';
 import { DEFAULT_CALIBRATION_CONFIG } from '../types';
 import { maClient, resolveClickTrackUrl } from '../ma-client';
 
+export interface CalibrationRoom {
+  playerId: string;
+  name: string;
+}
+
 export type CalibrationEventType =
   | 'started'
-  | 'clock_syncing'
-  | 'clock_synced'
   | 'playback_started'
-  | 'click_detected'
-  | 'progress'
+  | 'clicks_heard'
+  | 'room_measuring'
+  | 'room_measured'
+  | 'analyzing'
   | 'completed'
   | 'error';
 
@@ -31,326 +36,279 @@ export interface CalibrationEvent {
 
 type CalibrationEventCallback = (event: CalibrationEvent) => void;
 
+/** Seconds of settling time after tapping "measure here" before clicks count */
+const GUARD_S = 1;
+/** Seconds of recording that count for one room */
+const WINDOW_S = 10;
+/** Sendspin/MA can take a while to start the stream; give up waiting after this */
+const HEAR_TIMEOUT_S = 40;
+
+interface Measurement {
+  playerId: string;
+  startTime: number;
+  endTime: number;
+}
+
 export class CalibrationSession {
-  private audioDetector: AudioDetector | null = null;
-  private clickTrackGenerator: ClickTrackGenerator;
-  private offsetCalculator: OffsetCalculator;
+  private recorder = new MicRecorder();
   private config: CalibrationConfig;
-
-  private playerId: string;
-  private playerName: string;
-  private serverUrl: string;
-  private detections: ClickDetection[] = [];
-  private expectedClicks: { time: number; frequency: number }[] = [];
   private eventCallback: CalibrationEventCallback | null = null;
+  private liveTimer: ReturnType<typeof setInterval> | null = null;
+  private windowTimer: ReturnType<typeof setTimeout> | null = null;
+  private measurements: Measurement[] = [];
+  private playing = false;
   private isRunning = false;
+  private heardTimes = new Set<number>();
+  private lastHeardCount = 0;
 
-  // Audio playback
-  private audioContext: AudioContext | null = null;
-  private audioSource: AudioBufferSourceNode | null = null;
+  private queueId: string;
+  private rooms: CalibrationRoom[];
+  private serverUrl: string;
 
+  /**
+   * @param queueId Player or sync-group leader the track is played on (the whole group plays it)
+   * @param rooms Rooms to measure, in order; the first is the reference
+   */
   constructor(
-    playerId: string,
-    playerName: string,
+    queueId: string,
+    rooms: CalibrationRoom[],
     serverUrl: string,
     config?: Partial<CalibrationConfig>
   ) {
-    this.playerId = playerId;
-    this.playerName = playerName;
+    this.queueId = queueId;
+    this.rooms = rooms;
     this.serverUrl = serverUrl;
     this.config = { ...DEFAULT_CALIBRATION_CONFIG, ...config };
-
-    this.clickTrackGenerator = new ClickTrackGenerator({
-      sampleRate: this.config.sampleRate,
-      frequencies: this.config.frequencies,
-      clickDuration: 50, // 50ms for reliable detection
-      clickInterval: this.config.clickIntervalMs,
-      totalDuration: this.config.totalClicks,
-    });
-
-    this.offsetCalculator = new OffsetCalculator(this.config.sampleRate);
-    this.expectedClicks = this.clickTrackGenerator.getClickTimestamps();
   }
 
-  /**
-   * Start calibration session
-   */
-  async start(callback: CalibrationEventCallback): Promise<void> {
-    if (this.isRunning) {
-      throw new Error('Calibration already running');
-    }
+  get windowSeconds(): number {
+    return WINDOW_S;
+  }
 
+  async start(callback: CalibrationEventCallback): Promise<void> {
+    if (this.isRunning) throw new Error('Calibration already running');
     this.eventCallback = callback;
-    this.detections = [];
     this.isRunning = true;
+    this.measurements = [];
+    this.heardTimes.clear();
 
     try {
-      // NOTE: we deliberately do NOT open a Sendspin connection here. Every
-      // client/hello registers a new player in Music Assistant ("GroupSync"
-      // ghosts), and the clock offset was never used by the measurement.
-
-      // Step 1: Initialize audio detector (microphone)
-      this.audioDetector = createAudioDetector({
-        sampleRate: this.config.sampleRate,
-        expectedFrequencies: this.config.frequencies,
-      });
-
-      await this.audioDetector.initialize();
-
-      // Create audio context for playback
-      this.audioContext = new AudioContext({ sampleRate: this.config.sampleRate });
-
+      await this.recorder.start();
       this.emit({ type: 'started' });
 
-      // Start listening for clicks via microphone
-      this.audioDetector.startListening((detection) => {
-        this.handleDetection(detection);
-      });
-
-      // Small delay to ensure mic is ready, then start playing click track
+      // Let the mic settle so the noise floor is recorded before the first click
       await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Step 2: Play click track through Music Assistant
-      console.log('[CalibrationSession] Starting click track playback via Music Assistant...');
 
       // Plain-HTTP URL on this machine's LAN IP (served by the dev server) so MA can fetch it
       const clickTrackUrl = await resolveClickTrackUrl(this.serverUrl);
       console.log('[CalibrationSession] Click track URL:', clickTrackUrl);
 
-      let playbackMethod: 'music_assistant' | 'local' = 'music_assistant';
+      await maClient.playMedia(this.queueId, clickTrackUrl, 'replace');
+      this.playing = true;
+      this.emit({ type: 'playback_started', data: { url: clickTrackUrl } });
 
-      try {
-        // Tell Music Assistant to play the click track on the selected player
-        // 'replace' clears the queue and plays immediately
-        await maClient.playMedia(this.playerId, clickTrackUrl, 'replace');
-        console.log('[CalibrationSession] Click track command sent to', this.playerName);
-      } catch (playError) {
-        console.error('[CalibrationSession] Failed to play via MA, falling back to local playback:', playError);
-        playbackMethod = 'local';
-
-        // Fallback to local playback (phone speaker)
-        const buffer = this.clickTrackGenerator.generateAudioBuffer(this.audioContext!);
-        this.audioSource = this.audioContext!.createBufferSource();
-        this.audioSource.buffer = buffer;
-        this.audioSource.connect(this.audioContext!.destination);
-        this.audioSource.start();
-
-        console.log('[CalibrationSession] Fallback: Click track playing through phone speaker');
-      }
-
-      this.emit({
-        type: 'playback_started',
-        data: {
-          method: playbackMethod,
-          url: clickTrackUrl,
-        },
-      });
-
-      // Auto-stop after calibration duration
-      // Add extra buffer for MA playback startup latency
-      const totalDurationMs = this.config.totalClicks * this.config.clickIntervalMs + 5000;
-      setTimeout(() => {
-        if (this.isRunning) {
-          this.complete();
-        }
-      }, totalDurationMs);
+      this.startLiveDetection();
     } catch (error) {
-      this.emit({
-        type: 'error',
-        data: error instanceof Error ? error.message : 'Calibration failed',
-      });
-      this.cleanup();
+      const message = error instanceof Error ? error.message : 'Calibration failed';
+      this.emit({ type: 'error', data: message });
+      await this.cleanup();
       throw error;
     }
   }
 
-  /**
-   * Stop calibration early
-   */
-  stop(): void {
-    if (this.isRunning) {
-      this.cleanup();
+  /** Begin the measurement window for a room (the user is standing there now). */
+  measureRoom(playerId: string): void {
+    if (!this.isRunning || this.windowTimer) return;
+    const startTime = this.recorder.elapsed + GUARD_S;
+    const endTime = startTime + WINDOW_S;
+    this.measurements.push({ playerId, startTime, endTime });
+    this.emit({
+      type: 'room_measuring',
+      data: { playerId, seconds: GUARD_S + WINDOW_S },
+    });
+    this.windowTimer = setTimeout(() => {
+      this.windowTimer = null;
+      const clicks = this.countClicks(startTime, endTime);
+      this.emit({ type: 'room_measured', data: { playerId, clicks } });
+    }, (GUARD_S + WINDOW_S) * 1000 + 300);
+  }
+
+  /** Discard the last measurement (e.g. it heard nothing) so the room can be retried. */
+  discardLastMeasurement(): void {
+    if (this.windowTimer) {
+      clearTimeout(this.windowTimer);
+      this.windowTimer = null;
+    }
+    this.measurements.pop();
+  }
+
+  getLevel(): number {
+    return this.recorder.level;
+  }
+
+  /** Seconds of recording left before the track (or buffer) runs out */
+  get remainingSeconds(): number {
+    return Math.max(0, Math.min(this.config.totalClicks * this.config.clickIntervalMs / 1000, MicRecorder.MAX_SECONDS) - this.recorder.elapsed);
+  }
+
+  /** Analyse the whole recording and emit the per-room results. */
+  async finish(): Promise<void> {
+    if (!this.isRunning) return;
+    this.stopTimers();
+    this.emit({ type: 'analyzing' });
+    // Let the UI paint the spinner before the heavy synchronous analysis
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    try {
+      const sr = this.recorder.sampleRate;
+      const samples = this.recorder.getSamples(0, this.recorder.elapsed);
+      await this.stopPlayback();
+
+      const intervalS = this.config.clickIntervalMs / 1000;
+      const clicks = detectClicks(samples, sr, this.config.frequencies);
+      const analysis = analyzeRooms(
+        clicks,
+        this.measurements,
+        this.config.frequencies.length,
+        intervalS
+      );
+      console.log('[CalibrationSession] Analysis:', analysis);
+
+      // Players measured twice (reference closing check) are reported once, from the first window
+      const seen = new Set<string>();
+      const measured = analysis.rooms
+        .map((room, i) => ({ room, i }))
+        .filter(({ room }) => {
+          if (seen.has(room.playerId)) return false;
+          seen.add(room.playerId);
+          return true;
+        });
+
+      const arrivals = measured
+        .map(({ room }) => room.arrivalMs)
+        .filter((v): v is number => v !== null);
+      const latest = arrivals.length > 0 ? Math.max(...arrivals) : 0;
+
+      const results: CalibrationResult[] = [];
+      for (const { room, i } of measured) {
+        const info = this.rooms.find((r) => r.playerId === room.playerId);
+        const current = await maClient.getPlayerSyncAdjust(room.playerId);
+        // What we measured already includes the delay currently set, so the new value is
+        // current + extra delay needed to line up with the latest-arriving room.
+        const extra = room.arrivalMs === null ? 0 : latest - room.arrivalMs;
+        const suggested = Math.round((current ?? 0) + extra);
+        results.push({
+          playerId: room.playerId,
+          playerName: info?.name ?? room.playerId,
+          offsetMs: suggested,
+          arrivalMs: room.arrivalMs ?? undefined,
+          currentSyncAdjustMs: current,
+          spreadMs: room.spreadMs ?? undefined,
+          isReference: i === 0,
+          confidence: this.confidence(room.clicks, room.spreadMs),
+          detectedClicks: room.clicks,
+          totalClicks: WINDOW_S,
+        });
+      }
+
+      this.emit({
+        type: 'completed',
+        data: {
+          results,
+          driftPpm: analysis.driftPpm,
+          usableClicks: analysis.usableClicks,
+          audioGaps: this.recorder.gapCount,
+        },
+      });
+    } catch (error) {
+      this.emit({ type: 'error', data: error instanceof Error ? error.message : 'Analysis failed' });
+    } finally {
+      await this.cleanup();
     }
   }
 
-  /**
-   * Get current progress
-   */
-  getProgress(): { detected: number; total: number; percentage: number } {
-    const total = this.config.totalClicks;
-    const detected = this.detections.length;
-    return {
-      detected,
-      total,
-      percentage: Math.round((detected / total) * 100),
-    };
-  }
-
-  /**
-   * Get current audio level (for visualization)
-   */
-  getCurrentLevel(): number {
-    return this.audioDetector?.getCurrentLevel() ?? 0;
-  }
-
-  /**
-   * Get frequency data (for visualization)
-   */
-  getFrequencyData(): Uint8Array {
-    return this.audioDetector?.getFrequencyData() ?? new Uint8Array(0);
+  /** Abort without analysing */
+  stop(): void {
+    void this.cleanup();
   }
 
   // ==================== Private Methods ====================
 
-  private handleDetection(detection: ClickDetection): void {
-    this.detections.push(detection);
-
-    this.emit({
-      type: 'click_detected',
-      data: detection,
-    });
-
-    this.emit({
-      type: 'progress',
-      data: this.getProgress(),
-    });
-
-    console.log(`[CalibrationSession] Detection ${this.detections.length}/${this.config.totalClicks}`);
+  private confidence(clicks: number, spreadMs: number | null): number {
+    if (clicks === 0 || spreadMs === null) return 0;
+    const countScore = Math.min(1, clicks / 8);
+    const spreadScore = Math.max(0, 1 - spreadMs / 5);
+    return Math.round(countScore * spreadScore * 100) / 100;
   }
 
-  private complete(): void {
-    if (!this.isRunning) return;
-
-    this.isRunning = false;
-    this.audioDetector?.stopListening();
-
-    // Match detections to expected clicks
-    const matchedDetections = this.matchDetections();
-
-    // Calculate average offset
-    const { offsetMs, confidence, stdDev } = this.offsetCalculator.calculateAverageOffset(
-      matchedDetections
-    );
-
-    const result: CalibrationResult = {
-      playerId: this.playerId,
-      playerName: this.playerName,
-      offsetMs,
-      confidence,
-      detectedClicks: this.detections.length,
-      totalClicks: this.config.totalClicks,
-    };
-
-    console.log('[CalibrationSession] Complete:', result, 'stdDev:', stdDev);
-
-    this.emit({
-      type: 'completed',
-      data: result,
-    });
-
-    this.cleanup();
+  /** Clicks heard in a time range of the recording (for the "did it hear anything" check) */
+  private countClicks(fromS: number, toS: number): number {
+    const samples = this.recorder.getSamples(fromS, toS);
+    return detectClicks(samples, this.recorder.sampleRate, this.config.frequencies, fromS).length;
   }
 
-  private matchDetections(): Array<{ expectedTime: number; detectedTime: number }> {
-    const matched: Array<{ expectedTime: number; detectedTime: number }> = [];
-    const usedExpected = new Set<number>();
-    const frequencyTolerance = 150; // Hz tolerance for matching
+  /** Once a second, scan the last few seconds so the UI can show clicks arriving. */
+  private startLiveDetection(): void {
+    const startedAt = Date.now();
+    this.liveTimer = setInterval(() => {
+      const end = this.recorder.elapsed;
+      const from = Math.max(0, end - 6);
+      const clicks = detectClicks(
+        this.recorder.getSamples(from, end),
+        this.recorder.sampleRate,
+        this.config.frequencies,
+        from
+      );
+      for (const c of clicks) this.heardTimes.add(Math.round(c.time));
+      const waitedS = (Date.now() - startedAt) / 1000;
+      this.emit({
+        type: 'clicks_heard',
+        data: {
+          total: this.heardTimes.size,
+          newClicks: this.heardTimes.size - this.lastHeardCount,
+          level: this.recorder.level,
+          timedOut: this.heardTimes.size === 0 && waitedS > HEAR_TIMEOUT_S,
+          remainingSeconds: this.remainingSeconds,
+        },
+      });
+      this.lastHeardCount = this.heardTimes.size;
+    }, 1000);
+  }
 
-    // First pass: estimate the overall offset from the first few detections
-    // This handles the case where MA playback starts with some delay
-    let estimatedOffset = 0;
-    if (this.detections.length > 0) {
-      // Find first detection that matches a frequency
-      for (const detection of this.detections.slice(0, 5)) {
-        for (const expected of this.expectedClicks) {
-          if (Math.abs(detection.frequency - expected.frequency) <= frequencyTolerance) {
-            // This detection likely corresponds to this expected click
-            estimatedOffset = detection.timestamp - expected.time;
-            console.log(`[CalibrationSession] Estimated playback offset: ${estimatedOffset.toFixed(0)}ms`);
-            break;
-          }
-        }
-        if (estimatedOffset !== 0) break;
-      }
+  private stopTimers(): void {
+    if (this.liveTimer) clearInterval(this.liveTimer);
+    this.liveTimer = null;
+    if (this.windowTimer) clearTimeout(this.windowTimer);
+    this.windowTimer = null;
+  }
+
+  private async stopPlayback(): Promise<void> {
+    if (!this.playing) return;
+    this.playing = false;
+    try {
+      await maClient.playerCommand(this.queueId, 'stop');
+    } catch (error) {
+      console.warn('[CalibrationSession] Could not stop playback:', error);
     }
-
-    for (const detection of this.detections) {
-      // Find the closest expected click that:
-      // 1. Hasn't been matched yet
-      // 2. Has matching frequency
-      // 3. Is within reasonable time range (accounting for estimated offset)
-      let bestMatch: { index: number; diff: number } | null = null;
-
-      for (let i = 0; i < this.expectedClicks.length; i++) {
-        if (usedExpected.has(i)) continue;
-
-        const expected = this.expectedClicks[i];
-
-        // Check frequency match first
-        if (Math.abs(detection.frequency - expected.frequency) > frequencyTolerance) {
-          continue;
-        }
-
-        // Calculate time difference, accounting for estimated playback offset
-        const adjustedExpectedTime = expected.time + estimatedOffset;
-        const diff = Math.abs(detection.timestamp - adjustedExpectedTime);
-
-        // Only match if within reasonable range (±300ms after offset adjustment)
-        if (diff < 300 && (!bestMatch || diff < bestMatch.diff)) {
-          bestMatch = { index: i, diff };
-        }
-      }
-
-      if (bestMatch) {
-        usedExpected.add(bestMatch.index);
-        matched.push({
-          expectedTime: this.expectedClicks[bestMatch.index].time,
-          detectedTime: detection.timestamp,
-        });
-        console.log(`[CalibrationSession] Matched detection at ${detection.timestamp.toFixed(0)}ms (${detection.frequency}Hz) to expected click #${bestMatch.index + 1} at ${this.expectedClicks[bestMatch.index].time}ms`);
-      } else {
-        console.log(`[CalibrationSession] No match for detection at ${detection.timestamp.toFixed(0)}ms (${detection.frequency}Hz)`);
-      }
-    }
-
-    console.log(`[CalibrationSession] Matched ${matched.length} of ${this.detections.length} detections`);
-    return matched;
   }
 
   private emit(event: CalibrationEvent): void {
     this.eventCallback?.(event);
   }
 
-  private cleanup(): void {
+  private async cleanup(): Promise<void> {
     this.isRunning = false;
-
-    // Stop audio playback
-    try {
-      this.audioSource?.stop();
-    } catch {
-      // Already stopped
-    }
-    this.audioSource = null;
-
-    if (this.audioContext?.state !== 'closed') {
-      this.audioContext?.close();
-    }
-    this.audioContext = null;
-
-    // Stop microphone
-    this.audioDetector?.dispose();
-    this.audioDetector = null;
+    this.stopTimers();
+    await this.stopPlayback();
+    this.recorder.stop();
   }
 }
 
-/**
- * Create a new calibration session
- */
 export function createCalibrationSession(
-  playerId: string,
-  playerName: string,
+  queueId: string,
+  rooms: CalibrationRoom[],
   serverUrl: string,
   config?: Partial<CalibrationConfig>
 ): CalibrationSession {
-  return new CalibrationSession(playerId, playerName, serverUrl, config);
+  return new CalibrationSession(queueId, rooms, serverUrl, config);
 }

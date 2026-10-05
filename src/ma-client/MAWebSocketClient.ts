@@ -407,6 +407,26 @@ export class MAWebSocketClient {
   }
 
   /**
+   * Read the player's current sync delay (sync_adjust, ms) from its MA config.
+   * Returns null if it can't be read.
+   */
+  async getPlayerSyncAdjust(playerId: string): Promise<number | null> {
+    try {
+      const config = await this.sendCommand<{ values?: Record<string, unknown> }>('config/players/get', {
+        player_id: playerId,
+      });
+      const entry = config?.values?.sync_adjust;
+      const raw =
+        entry && typeof entry === 'object' ? (entry as { value?: unknown }).value : entry;
+      const value = Number(raw ?? 0);
+      return Number.isFinite(value) ? value : null;
+    } catch (error) {
+      console.warn('[MA] Could not read sync_adjust for', playerId, error);
+      return null;
+    }
+  }
+
+  /**
    * Remove a (disconnected) player's configuration from Music Assistant
    */
   async removePlayerConfig(playerId: string): Promise<void> {
