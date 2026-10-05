@@ -36,12 +36,12 @@ function envFiles(root: string): string[] {
   return [path.join(root, '.env.local'), path.join(root, '.env')];
 }
 
-/** MA_TOKEN from the process env or .env.local / .env (re-read each time so saving takes effect without a restart) */
-function readSavedToken(root: string): string | null {
-  if (process.env.MA_TOKEN) return process.env.MA_TOKEN;
+/** A key from the process env or .env.local / .env (re-read each time so saving takes effect without a restart) */
+function readEnvValue(root: string, key: string): string | null {
+  if (process.env[key]) return process.env[key]!;
   for (const file of envFiles(root)) {
     try {
-      const m = /^MA_TOKEN=(.*)$/m.exec(fs.readFileSync(file, 'utf8'));
+      const m = new RegExp(`^${key}=(.*)$`, 'm').exec(fs.readFileSync(file, 'utf8'));
       if (m && m[1].trim()) return m[1].trim().replace(/^['"]|['"]$/g, '');
     } catch {
       // file missing
@@ -50,8 +50,11 @@ function readSavedToken(root: string): string | null {
   return null;
 }
 
-/** Write (or with null, remove) MA_TOKEN in .env.local */
-function writeSavedToken(root: string, token: string | null): void {
+const readSavedToken = (root: string) => readEnvValue(root, 'MA_TOKEN');
+const writeSavedToken = (root: string, token: string | null) => writeEnvValue(root, 'MA_TOKEN', token);
+
+/** Write (or with null, remove) a key in .env.local */
+function writeEnvValue(root: string, key: string, value: string | null): void {
   const file = envFiles(root)[0];
   let content = '';
   try {
@@ -59,8 +62,8 @@ function writeSavedToken(root: string, token: string | null): void {
   } catch {
     // new file
   }
-  const lines = content.split('\n').filter((l) => l && !l.startsWith('MA_TOKEN='));
-  if (token) lines.push(`MA_TOKEN=${token}`);
+  const lines = content.split('\n').filter((l) => l && !l.startsWith(`${key}=`));
+  if (value) lines.push(`${key}=${value}`);
   fs.writeFileSync(file, lines.join('\n') + (lines.length ? '\n' : ''), { mode: 0o600 });
 }
 
@@ -200,6 +203,44 @@ export function groupSyncPlugin(): Plugin {
       });
       return;
     }
+    if (url.pathname === '/__groupsync/server' && req.method === 'POST') {
+      if (!isLoopback(req)) {
+        res.statusCode = 403;
+        return res.end();
+      }
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        try {
+          const { server } = JSON.parse(body) as { server?: string | null };
+          if (server && !/^[A-Za-z0-9.:/-]{3,200}$/.test(server)) throw new Error('bad server');
+          writeEnvValue(rootDir, 'MA_URL', server || null);
+          res.end('{"ok":true}');
+        } catch {
+          res.statusCode = 400;
+          res.end();
+        }
+      });
+      return;
+    }
+    if (url.pathname === '/__groupsync/check') {
+      // Can this computer reach MA's websocket? (separates "wrong address" from "browser can't reach this server")
+      const target = parseTarget(url.searchParams.get('target'));
+      res.setHeader('Content-Type', 'application/json');
+      if (!target) return res.end(JSON.stringify({ ok: false, error: 'invalid address' }));
+      const ws = new WebSocket(`ws://${target.host}:${target.port}/ws`);
+      const finish = (ok: boolean, error?: string) => {
+        clearTimeout(timer);
+        ws.removeAllListeners();
+        ws.on('error', () => {});
+        ws.terminate();
+        if (!res.writableEnded) res.end(JSON.stringify({ ok, error }));
+      };
+      const timer = setTimeout(() => finish(false, 'timed out after 4 s (wrong IP, or a firewall in between)'), 4000);
+      ws.on('message', () => finish(true));
+      ws.on('error', (e) => finish(false, e.message));
+      return;
+    }
     if (url.pathname !== '/__groupsync/info') return next();
     const target = parseTarget(url.searchParams.get('target'));
     const ip = pickLanIp(target?.host ?? null);
@@ -208,6 +249,7 @@ export function groupSyncPlugin(): Plugin {
       JSON.stringify({
         clickTrackUrl: ip ? `http://${ip}:${MEDIA_PORT}/${TRACK_NAME}` : null,
         tokenSaved: !!readSavedToken(rootDir),
+        defaultServer: readEnvValue(rootDir, 'MA_URL'),
         canSaveToken: isLoopback(req),
       })
     );

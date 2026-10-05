@@ -40,7 +40,8 @@ export const useConnectionStore = create<ConnectionState & ConnectionActions>()(
 
       setConnected: (connected) => set({ connected, connecting: false }),
 
-      setConnecting: (connecting) => set({ connecting, error: null }),
+      // Starting a connection clears the old error; finishing one must not wipe a new error
+      setConnecting: (connecting) => set(connecting ? { connecting, error: null } : { connecting }),
 
       setError: (error) => set({ error, connecting: false, connected: false }),
 
@@ -50,7 +51,7 @@ export const useConnectionStore = create<ConnectionState & ConnectionActions>()(
         set({ recentServers: [url, ...filtered].slice(0, 5) });
       },
 
-      reset: () => set({ ...initialState, recentServers: get().recentServers }),
+      reset: () => set({ ...initialState, serverUrl: get().serverUrl, recentServers: get().recentServers }),
     }),
     {
       name: 'groupsync-connection',

@@ -33,6 +33,7 @@ export function CalibrationWizard() {
   const [roomStates, setRoomStates] = useState<Record<string, RoomState>>({});
   const [closingDone, setClosingDone] = useState(false);
   const [measuringLeft, setMeasuringLeft] = useState(0);
+  const [measuringName, setMeasuringName] = useState('');
   const [live, setLive] = useState({ total: 0, level: 0, timedOut: false, remaining: 0 });
   const [playing, setPlaying] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -150,6 +151,7 @@ export function CalibrationWizard() {
   const handleMeasure = (playerId: string) => {
     const session = sessionRef.current;
     if (!session || measuring) return;
+    setMeasuringName(nameOf(playerId));
     setRoomStates((prev) => ({ ...prev, [playerId]: 'measuring' }));
     setMeasuringLeft(session.windowSeconds + 3);
     session.measureRoom(playerId);
@@ -165,6 +167,7 @@ export function CalibrationWizard() {
   const handleMeasureClosing = () => {
     const session = sessionRef.current;
     if (!session || !firstRoom || measuring) return;
+    setMeasuringName(firstRoom.name);
     setMeasuringLeft(session.windowSeconds + 3);
     session.measureRoom(firstRoom.player_id);
     if (countdownRef.current) clearInterval(countdownRef.current);
@@ -221,8 +224,9 @@ export function CalibrationWizard() {
             <div className="text-6xl mb-4">📱</div>
             <h2 className="text-2xl font-bold mb-2">How this works</h2>
             <p className="text-text-muted">
-              A click track plays on the whole group while your phone records. You walk to each
-              room and tap <b>Measure here</b>. Rooms are compared inside one recording, so
+              A click track plays on the whole group while your phone records. All speakers keep
+              playing the whole time (that&apos;s what keeps them in sync); when you tap <b>Measure here</b> the others are
+              muted briefly so only the one next to you is heard. Rooms are compared inside one recording, so
               nothing needs to be lined up in advance.
             </p>
           </div>
@@ -357,6 +361,13 @@ export function CalibrationWizard() {
               No clicks heard after 40 s. Check that the speakers are playing, the volume is up, and the
               phone is close. If MA reports a playback error, the click track URL may not be reachable
               from your Music Assistant server.
+            </div>
+          )}
+
+          {measuringLeft > 0 && (
+            <div className="p-3 bg-primary/20 border border-primary rounded-lg text-sm text-center">
+              Measuring <b>{measuringName}</b>. All speakers keep playing in sync; the others are muted for
+              these few seconds so only this one is heard. Hold the phone still.
             </div>
           )}
 

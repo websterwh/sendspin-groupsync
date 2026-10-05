@@ -53,10 +53,11 @@ export class MAWebSocketClient {
   /**
    * Connect to Music Assistant server
    */
-  async connect(serverUrl: string): Promise<void> {
+  async connect(serverUrl: string, isReconnect = false): Promise<void> {
     this.serverUrl = serverUrl;
-    this.shouldReconnect = true;
-    this.reconnectAttempts = 0;
+    // Only auto-reconnect after a connection has worked once; a failed first attempt just fails
+    this.shouldReconnect = isReconnect;
+    if (!isReconnect) this.reconnectAttempts = 0;
     this.initialized = false;
 
     return new Promise((resolve, reject) => {
@@ -89,6 +90,7 @@ export class MAWebSocketClient {
                 console.log('[MA] Server info:', this.serverInfo);
                 clearTimeout(connectionTimeout);
                 this.reconnectAttempts = 0;
+                this.shouldReconnect = true;
                 this.connectionHandlers.forEach((handler) => handler());
                 resolve();
                 return;
@@ -533,7 +535,7 @@ export class MAWebSocketClient {
 
     setTimeout(() => {
       if (this.shouldReconnect && this.serverUrl) {
-        this.connect(this.serverUrl).catch((error) => {
+        this.connect(this.serverUrl, true).catch((error) => {
           console.error('[MA] Reconnect failed:', error);
         });
       }

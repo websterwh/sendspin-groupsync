@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useConnectionStore, usePlayersStore } from '../store';
-import { maClient, saveTokenToEnv, getDevServerInfo } from '../ma-client';
+import { maClient, saveTokenToEnv, getDevServerInfo, saveServerToEnv, diagnoseConnection } from '../ma-client';
+import type { DiagnosticStep } from '../ma-client';
 
 export function ConnectionPanel() {
   const {
@@ -26,7 +27,18 @@ export function ConnectionPanel() {
   const [authenticating, setAuthenticating] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
   const [saveToEnv, setSaveToEnv] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticStep[] | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
   const [canSaveToEnv, setCanSaveToEnv] = useState(false);
+
+  // Pre-fill the address saved on the dev-server machine (so a phone doesn't need it typed)
+  useEffect(() => {
+    if (inputUrl) return;
+    getDevServerInfo('').then((info) => {
+      if (info?.defaultServer) setInputUrl((current) => current || info.defaultServer!);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!needsAuth) return;
@@ -61,6 +73,7 @@ export function ConnectionPanel() {
 
     setConnecting(true);
     setError(null);
+    setDiagnostics(null);
     setNeedsAuth(false);
 
     try {
@@ -71,6 +84,7 @@ export function ConnectionPanel() {
       setServerUrl(inputUrl.trim());
       setSendspinUrl(inputSendspinUrl.trim());
       addRecentServer(inputUrl.trim());
+      void saveServerToEnv(inputUrl.trim());
 
       // Token saved in .env.local on the dev-server machine (never sent to the browser)
       const authedFromEnv = await maClient.authenticateWithServerToken();
@@ -98,6 +112,11 @@ export function ConnectionPanel() {
 
       setError(message);
       console.error('[MA] Connection error:', err);
+      // No console on a phone: say which hop is failing
+      setDiagnosing(true);
+      diagnoseConnection(inputUrl.trim())
+        .then(setDiagnostics)
+        .finally(() => setDiagnosing(false));
     } finally {
       setConnecting(false);
     }
@@ -374,6 +393,19 @@ export function ConnectionPanel() {
         {error && (
           <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-red-300 text-sm">
             {error}
+          </div>
+        )}
+
+        {(diagnosing || diagnostics) && (
+          <div className="p-3 bg-surface border border-gray-600 rounded-lg text-sm space-y-2">
+            <p className="font-medium">Connection check</p>
+            {diagnosing && <p className="text-text-muted">Checking...</p>}
+            {diagnostics?.map((step) => (
+              <div key={step.label}>
+                <span>{step.ok ? '✅' : '❌'} {step.label}</span>
+                {step.detail && <p className="text-xs text-text-muted ml-6">{step.detail}</p>}
+              </div>
+            ))}
           </div>
         )}
 
