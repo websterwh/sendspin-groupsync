@@ -3,7 +3,7 @@
 ## Quick start (how measurement works now)
 
 1. `npm install && npm run dev` on a desktop; open the printed **https** Network URL on your phone (accept the self-signed cert once - needed for the mic).
-2. Connect with MA's address (`192.168.x.x:8095`, plain HTTP is fine) and paste a long-lived token. The dev server proxies MA over `wss://` so the browser doesn't block it, and serves the click track over plain HTTP on port 5174 (allow 5173/5174 through the desktop firewall). No other setup.
+2. Connect with MA's address (`192.168.x.x:8095`, plain HTTP is fine) and paste a long-lived token (tick *Save token in .env.local* to keep it on the desktop as `MA_TOKEN`; the dev server substitutes it, so it never reaches the browser and phones connect without typing it). The dev server proxies MA over `wss://` so the browser doesn't block it, and serves the click track over plain HTTP on port 5174 (allow 5173/5174 through the desktop firewall). No other setup.
 3. Put the players you want in sync into **one sync group in Music Assistant**, select them here and start. Walk to each room and tap *Measure here*; return to the first room at the end (corrects clock drift).
 4. Results are shown as a suggested per-player sync delay (MA's `sync_adjust`). Enter them in MA yourself, or tick *auto-push* (off by default).
 

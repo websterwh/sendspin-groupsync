@@ -27,6 +27,7 @@ export type CalibrationEventType =
   | 'clicks_heard'
   | 'room_measuring'
   | 'room_measured'
+  | 'mute_problems'
   | 'analyzing'
   | 'completed'
   | 'error';
@@ -64,6 +65,7 @@ export class CalibrationSession {
   private isRunning = false;
   private heardTimes = new Set<number>();
   private lastHeardCount = 0;
+  private muteProblems = new Map<string, string>();
 
   private queueId: string;
   private rooms: CalibrationRoom[];
@@ -85,6 +87,15 @@ export class CalibrationSession {
     this.config = { ...DEFAULT_CALIBRATION_CONFIG, ...config };
   }
 
+  /**
+   * Track length: up to ~30 s for playback to start, then per room (plus the closing
+   * check on the first room) about 12 s of measuring and ~13 s of walking.
+   */
+  get trackSeconds(): number {
+    const perRoom = WINDOW_S + GUARD_S + 12;
+    return Math.min(300, Math.max(60, Math.round(30 + (this.rooms.length + 1) * perRoom)));
+  }
+
   get windowSeconds(): number {
     return WINDOW_S;
   }
@@ -104,7 +115,7 @@ export class CalibrationSession {
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       // Plain-HTTP URL on this machine's LAN IP (served by the dev server) so MA can fetch it
-      const clickTrackUrl = await resolveClickTrackUrl(this.serverUrl);
+      const clickTrackUrl = await resolveClickTrackUrl(this.serverUrl, this.trackSeconds);
       console.log('[CalibrationSession] Click track URL:', clickTrackUrl);
 
       await maClient.playMedia(this.queueId, clickTrackUrl, 'replace');
@@ -150,18 +161,52 @@ export class CalibrationSession {
     }, (GUARD_S + WINDOW_S) * 1000 + 300);
   }
 
-  /** Mute everyone except `playerId` (which is unmuted so it can be heard). */
+  /** Mute everyone except `playerId` (which is unmuted so it can be heard), then verify it took effect. */
   private async applyMutes(playerId: string): Promise<void> {
-    const changes = this.rooms.map(async (room) => {
-      const shouldMute = room.playerId !== playerId;
-      try {
-        await maClient.playerCommand(room.playerId, 'volume_mute', { muted: shouldMute });
-        this.mutesChanged = true;
-      } catch (error) {
-        console.warn('[CalibrationSession] Could not set mute for', room.name, error);
+    const failed = new Map<string, string>();
+    await Promise.all(
+      this.rooms.map(async (room) => {
+        const shouldMute = room.playerId !== playerId;
+        try {
+          await maClient.playerCommand(room.playerId, 'volume_mute', { muted: shouldMute });
+          this.mutesChanged = true;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          console.warn('[CalibrationSession] Could not set mute for', room.name, reason);
+          if (shouldMute) failed.set(room.name, reason);
+        }
+      })
+    );
+
+    // Commands can be accepted without effect (e.g. grouped players); read the state back
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await Promise.all(
+      this.rooms
+        .filter((room) => room.playerId !== playerId && !failed.has(room.name))
+        .map(async (room) => {
+          try {
+            const p = await maClient.getPlayer(room.playerId);
+            const muted = p.volume_muted ?? p.muted;
+            if (muted === false) failed.set(room.name, 'mute command accepted but the player is still unmuted');
+          } catch {
+            // can't verify; assume ok
+          }
+        })
+    );
+
+    let changed = false;
+    failed.forEach((reason, name) => {
+      if (this.muteProblems.get(name) !== reason) {
+        this.muteProblems.set(name, reason);
+        changed = true;
       }
     });
-    await Promise.all(changes);
+    if (changed) {
+      this.emit({
+        type: 'mute_problems',
+        data: Array.from(this.muteProblems, ([name, reason]) => ({ name, reason })),
+      });
+    }
   }
 
   /** Put every room back to the mute state it had before calibration. */
@@ -196,7 +241,7 @@ export class CalibrationSession {
 
   /** Seconds of recording left before the track (or buffer) runs out */
   get remainingSeconds(): number {
-    return Math.max(0, Math.min(this.config.totalClicks * this.config.clickIntervalMs / 1000, MicRecorder.MAX_SECONDS) - this.recorder.elapsed);
+    return Math.max(0, Math.min(this.trackSeconds, MicRecorder.MAX_SECONDS) - this.recorder.elapsed);
   }
 
   /** Analyse the whole recording and emit the per-room results. */

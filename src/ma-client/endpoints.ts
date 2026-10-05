@@ -30,25 +30,52 @@ export function buildMaWebSocketUrl(serverUrl: string, path: '/ws' | '/sendspin'
   return `ws://${parsed.host}${path}`;
 }
 
+/** Sent instead of the real token when it's saved in .env.local; the dev-server proxy swaps it in */
+export const ENV_TOKEN_PLACEHOLDER = '__GROUPSYNC_ENV_TOKEN__';
+
+interface DevServerInfo {
+  clickTrackUrl?: string | null;
+  tokenSaved?: boolean;
+  canSaveToken?: boolean;
+}
+
+export async function getDevServerInfo(serverUrl: string): Promise<DevServerInfo | null> {
+  try {
+    const host = parseServer(serverUrl).host;
+    const res = await fetch(`/__groupsync/info?target=${encodeURIComponent(host)}`);
+    return res.ok ? ((await res.json()) as DevServerInfo) : null;
+  } catch {
+    return null; // not served by the GroupSync dev server
+  }
+}
+
+/** Save (or with null, forget) the MA token in .env.local on the machine running the dev server */
+export async function saveTokenToEnv(token: string | null): Promise<boolean> {
+  try {
+    const res = await fetch('/__groupsync/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Get a URL Music Assistant can fetch the click track from.
  *
  * The dev server exposes the track over plain HTTP on this machine's LAN IP,
  * so no configuration is needed. VITE_MEDIA_BASE_URL overrides it.
+ * `seconds` sizes the generated track.
  */
-export async function resolveClickTrackUrl(serverUrl: string): Promise<string> {
+export async function resolveClickTrackUrl(serverUrl: string, seconds?: number): Promise<string> {
+  const query = seconds ? `?seconds=${Math.round(seconds)}` : '';
   const override = import.meta.env.VITE_MEDIA_BASE_URL as string | undefined;
-  if (override) return `${override.replace(/\/$/, '')}/calibration-clicks.wav`;
+  if (override) return `${override.replace(/\/$/, '')}/calibration-clicks.wav${query}`;
 
-  try {
-    const host = parseServer(serverUrl).host;
-    const res = await fetch(`/__groupsync/info?target=${encodeURIComponent(host)}`);
-    if (res.ok) {
-      const info = (await res.json()) as { clickTrackUrl?: string | null };
-      if (info.clickTrackUrl) return info.clickTrackUrl;
-    }
-  } catch {
-    // Not served by the GroupSync dev server; fall through
-  }
+  const info = await getDevServerInfo(serverUrl);
+  if (info?.clickTrackUrl) return `${info.clickTrackUrl}${query}`;
   return `${window.location.origin}/calibration-clicks.wav`;
 }

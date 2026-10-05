@@ -9,7 +9,8 @@ export interface Player {
   available: boolean;
   powered: boolean;
   volume_level: number;
-  muted: boolean;
+  muted?: boolean;
+  volume_muted?: boolean;
   group_childs?: string[];
   synced_to?: string | null;
   active_group?: string | null;

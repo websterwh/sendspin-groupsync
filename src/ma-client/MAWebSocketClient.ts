@@ -4,7 +4,7 @@
  */
 
 import type { MAMessage, Player } from '../types';
-import { buildMaWebSocketUrl } from './endpoints';
+import { buildMaWebSocketUrl, getDevServerInfo, ENV_TOKEN_PLACEHOLDER } from './endpoints';
 
 type MessageHandler = (message: MAMessage) => void;
 type ConnectionHandler = () => void;
@@ -158,7 +158,8 @@ export class MAWebSocketClient {
    * Current access token (for the Sendspin proxy auth frame)
    */
   get token(): string | null {
-    return this.accessToken || this.getStoredToken();
+    const t = this.accessToken || this.getStoredToken();
+    return t === ENV_TOKEN_PLACEHOLDER ? null : t;
   }
 
   /**
@@ -216,17 +217,29 @@ export class MAWebSocketClient {
       this.accessToken = tokenToUse;
       this.authenticated = true;
       console.log('[MA] Authenticated with token');
-      try {
-        localStorage.setItem('ma_access_token', tokenToUse);
-      } catch {
-        // localStorage not available
+      if (tokenToUse !== ENV_TOKEN_PLACEHOLDER) {
+        try {
+          localStorage.setItem('ma_access_token', tokenToUse);
+        } catch {
+          // localStorage not available
+        }
       }
       return true;
     } catch (error) {
       console.log('[MA] Token authentication failed:', error instanceof Error ? error.message : 'error');
-      this.clearStoredToken();
+      if (tokenToUse !== ENV_TOKEN_PLACEHOLDER) this.clearStoredToken();
       return false;
     }
+  }
+
+  /**
+   * Authenticate with the token saved in .env.local on the dev-server machine.
+   * The browser only sends a placeholder; the dev-server proxy substitutes the real token.
+   */
+  async authenticateWithServerToken(): Promise<boolean> {
+    const info = await getDevServerInfo(this.serverUrl);
+    if (!info?.tokenSaved) return false;
+    return this.authenticateWithToken(ENV_TOKEN_PLACEHOLDER);
   }
 
   /**

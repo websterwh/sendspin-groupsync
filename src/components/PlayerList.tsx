@@ -46,7 +46,8 @@ export function PlayerList() {
       <div>
         <h2 className="text-2xl font-bold mb-2">Select Players</h2>
         <p className="text-text-muted">
-          Choose which players to calibrate for synchronized playback.
+          Select the individual speakers to calibrate (e.g. each of Shield, Sonos, Droid), not the group
+          they&apos;re in. They must already be in one sync group in Music Assistant.
         </p>
       </div>
 
@@ -83,7 +84,9 @@ export function PlayerList() {
 
           <div className="space-y-3">
             {players.filter((p) => p.name !== 'GroupSync').map((player) => {
-              const isAvailable = player.available !== false && player.powered !== false;
+              // A group player is one entity; its members are the rooms to measure
+              const isGroup = player.type === 'group';
+              const isAvailable = player.available !== false && player.powered !== false && !isGroup;
               const isSelected = selectedPlayerIds.includes(player.player_id);
 
               return (
@@ -117,7 +120,7 @@ export function PlayerList() {
                   <div className="flex-1 text-left min-w-0">
                     <div className="font-medium truncate">{player.name}</div>
                     <div className="text-sm text-text-muted">
-                      {isAvailable ? 'Available' : 'Offline'}
+                      {isGroup ? 'Group - select its speakers instead' : isAvailable ? 'Available' : 'Offline'}
                       {player.type && ` · ${player.type}`}
                     </div>
                   </div>

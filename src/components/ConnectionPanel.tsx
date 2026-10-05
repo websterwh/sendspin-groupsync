@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useConnectionStore, usePlayersStore } from '../store';
-import { maClient } from '../ma-client';
+import { maClient, saveTokenToEnv, getDevServerInfo } from '../ma-client';
 
 export function ConnectionPanel() {
   const {
@@ -25,6 +25,13 @@ export function ConnectionPanel() {
   const [password, setPassword] = useState('');
   const [authenticating, setAuthenticating] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
+  const [saveToEnv, setSaveToEnv] = useState(false);
+  const [canSaveToEnv, setCanSaveToEnv] = useState(false);
+
+  useEffect(() => {
+    if (!needsAuth) return;
+    getDevServerInfo(inputUrl || serverUrl).then((info) => setCanSaveToEnv(!!info?.canSaveToken));
+  }, [needsAuth, inputUrl, serverUrl]);
 
   const fetchPlayers = async (): Promise<boolean> => {
     setLoading(true);
@@ -65,9 +72,12 @@ export function ConnectionPanel() {
       setSendspinUrl(inputSendspinUrl.trim());
       addRecentServer(inputUrl.trim());
 
+      // Token saved in .env.local on the dev-server machine (never sent to the browser)
+      const authedFromEnv = await maClient.authenticateWithServerToken();
+
       // Try to authenticate with stored token (proactively, some servers require it)
       const hasStoredToken = localStorage.getItem('ma_access_token');
-      if (maClient.needsAuth || hasStoredToken) {
+      if (!authedFromEnv && (maClient.needsAuth || hasStoredToken)) {
         const tokenAuthSuccess = await maClient.authenticateWithToken();
         if (!tokenAuthSuccess && maClient.needsAuth) {
           // Server explicitly requires auth and token failed
@@ -125,6 +135,10 @@ export function ConnectionPanel() {
       if (!ok) {
         setError('Token was rejected by Music Assistant. Create a new long-lived token and try again.');
         return;
+      }
+      if (saveToEnv) {
+        const saved = await saveTokenToEnv(token);
+        if (!saved) setError('Connected, but the token could not be saved to .env.local.');
       }
       setTokenInput('');
       setNeedsAuth(false);
@@ -224,6 +238,20 @@ export function ConnectionPanel() {
             <p className="mt-1 text-xs text-text-muted">
               In Music Assistant: profile &rarr; Long-lived access tokens. Stored only in this browser.
             </p>
+            {canSaveToEnv && (
+              <label className="mt-2 flex items-start gap-2 text-xs text-text-muted">
+                <input
+                  type="checkbox"
+                  checked={saveToEnv}
+                  onChange={(e) => setSaveToEnv(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  Save token in <code>.env.local</code> on this computer, so other devices (your phone) connect
+                  without typing it. It stays on the dev server and is never sent to the browser.
+                </span>
+              </label>
+            )}
             <button
               onClick={handleTokenLogin}
               disabled={authenticating || !tokenInput.trim()}

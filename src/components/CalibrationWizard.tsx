@@ -41,6 +41,7 @@ export function CalibrationWizard() {
   const [analyzing, setAnalyzing] = useState(false);
   const [driftPpm, setDriftPpm] = useState<number | null>(null);
   const [audioGaps, setAudioGaps] = useState(0);
+  const [muteProblems, setMuteProblems] = useState<{ name: string; reason: string }[]>([]);
 
   // Auto-push is opt-in: by default we only show the value so the user enters it themselves
   const [autoPush, setAutoPush] = useState(() => {
@@ -74,6 +75,7 @@ export function CalibrationWizard() {
     if (!firstRoom || !playTarget) return;
     setError(null);
     setRoomStates({});
+    setMuteProblems([]);
     setClosingDone(false);
     setPlaying(false);
     setLive({ total: 0, level: 0, timedOut: false, remaining: 0 });
@@ -81,7 +83,7 @@ export function CalibrationWizard() {
 
     const session = createCalibrationSession(
       playTarget,
-      selectedPlayers.map((p) => ({ playerId: p.player_id, name: p.name, muted: p.muted })),
+      selectedPlayers.map((p) => ({ playerId: p.player_id, name: p.name, muted: p.volume_muted ?? p.muted })),
       serverUrl
     );
     sessionRef.current = session;
@@ -108,6 +110,9 @@ export function CalibrationWizard() {
             setMeasuringLeft(0);
             break;
           }
+          case 'mute_problems':
+            setMuteProblems(event.data as { name: string; reason: string }[]);
+            break;
           case 'analyzing':
             setAnalyzing(true);
             break;
@@ -343,6 +348,24 @@ export function CalibrationWizard() {
               No clicks heard after 40 s. Check that the speakers are playing, the volume is up, and the
               phone is close. If MA reports a playback error, the click track URL may not be reachable
               from your Music Assistant server.
+            </div>
+          )}
+
+          {muteProblems.length > 0 && (
+            <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm space-y-1">
+              <p className="font-medium">Couldn&apos;t mute every other player while measuring:</p>
+              <ul className="list-disc list-inside text-yellow-300/70">
+                {muteProblems.map((m) => (
+                  <li key={m.name}>
+                    {m.name}: {m.reason}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-yellow-300/70">
+                Those players will still be audible in other rooms, which can blur results if they share a
+                room with the one being measured. Mute them by hand (on the device or in MA) before tapping
+                Measure here.
+              </p>
             </div>
           )}
 

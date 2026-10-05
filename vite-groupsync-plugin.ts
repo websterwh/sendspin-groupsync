@@ -12,6 +12,8 @@
  *    the http:// URL (using this machine's LAN IP on MA's subnet).
  */
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import os from 'node:os';
 import type { Duplex } from 'node:stream';
 import type { Plugin } from 'vite';
@@ -20,18 +22,55 @@ import { DEFAULT_CALIBRATION_CONFIG } from './src/types/calibration';
 
 const MEDIA_PORT = Number(process.env.GROUPSYNC_MEDIA_PORT ?? 5174);
 const TRACK_NAME = 'calibration-clicks.wav';
-const TRACK_SECONDS = 300;
+const MAX_TRACK_SECONDS = 300;
 const TRACK_RATE = 48000;
 const CLICK_MS = 50;
 const CLICK_AMPLITUDE = 0.8;
 
-let cachedTrack: Buffer | null = null;
+const trackCache = new Map<number, Buffer>();
+
+/** Placeholder the page sends instead of the real token; swapped in by the proxy so the token never reaches the browser */
+const TOKEN_PLACEHOLDER = '__GROUPSYNC_ENV_TOKEN__';
+
+function envFiles(root: string): string[] {
+  return [path.join(root, '.env.local'), path.join(root, '.env')];
+}
+
+/** MA_TOKEN from the process env or .env.local / .env (re-read each time so saving takes effect without a restart) */
+function readSavedToken(root: string): string | null {
+  if (process.env.MA_TOKEN) return process.env.MA_TOKEN;
+  for (const file of envFiles(root)) {
+    try {
+      const m = /^MA_TOKEN=(.*)$/m.exec(fs.readFileSync(file, 'utf8'));
+      if (m && m[1].trim()) return m[1].trim().replace(/^['"]|['"]$/g, '');
+    } catch {
+      // file missing
+    }
+  }
+  return null;
+}
+
+/** Write (or with null, remove) MA_TOKEN in .env.local */
+function writeSavedToken(root: string, token: string | null): void {
+  const file = envFiles(root)[0];
+  let content = '';
+  try {
+    content = fs.readFileSync(file, 'utf8');
+  } catch {
+    // new file
+  }
+  const lines = content.split('\n').filter((l) => l && !l.startsWith('MA_TOKEN='));
+  if (token) lines.push(`MA_TOKEN=${token}`);
+  fs.writeFileSync(file, lines.join('\n') + (lines.length ? '\n' : ''), { mode: 0o600 });
+}
+
 
 /** Mono 16-bit click track: one 50 ms Hann-windowed tone burst per interval, cycling frequencies. */
-function buildTrack(): Buffer {
-  if (cachedTrack) return cachedTrack;
+function buildTrack(seconds: number): Buffer {
+  const cached = trackCache.get(seconds);
+  if (cached) return cached;
   const { frequencies, clickIntervalMs } = DEFAULT_CALIBRATION_CONFIG;
-  const total = TRACK_SECONDS * TRACK_RATE;
+  const total = seconds * TRACK_RATE;
   const clickSamples = Math.floor((CLICK_MS / 1000) * TRACK_RATE);
   const interval = Math.floor((clickIntervalMs / 1000) * TRACK_RATE);
   const buf = Buffer.alloc(44 + total * 2);
@@ -55,7 +94,7 @@ function buildTrack(): Buffer {
       buf.writeInt16LE(Math.round(v * 0x7fff), 44 + (click * interval + i) * 2);
     }
   }
-  cachedTrack = buf;
+  trackCache.set(seconds, buf);
   return buf;
 }
 
@@ -87,6 +126,7 @@ function parseTarget(raw: string | null): { host: string; port: string } | null 
 }
 
 export function groupSyncPlugin(): Plugin {
+  let rootDir = process.cwd();
   const wss = new WebSocketServer({ noServer: true });
   let mediaServer: http.Server | null = null;
 
@@ -103,7 +143,11 @@ export function groupSyncPlugin(): Plugin {
       const upstream = new WebSocket(`ws://${target.host}:${target.port}${upstreamPath}`);
       const pending: Array<{ data: Buffer; isBinary: boolean }> = [];
       client.on('message', (data, isBinary) => {
-        const buf = Buffer.isBuffer(data) ? data : Buffer.concat(data as Buffer[]);
+        let buf = Buffer.isBuffer(data) ? data : Buffer.concat(data as Buffer[]);
+        if (!isBinary && buf.includes(TOKEN_PLACEHOLDER)) {
+          const saved = readSavedToken(rootDir);
+          if (saved) buf = Buffer.from(buf.toString().split(TOKEN_PLACEHOLDER).join(saved));
+        }
         if (upstream.readyState === WebSocket.OPEN) upstream.send(buf, { binary: isBinary });
         else pending.push({ data: buf, isBinary });
       });
@@ -127,8 +171,35 @@ export function groupSyncPlugin(): Plugin {
     });
   };
 
+  const isLoopback = (req: http.IncomingMessage) => {
+    const addr = req.socket.remoteAddress ?? '';
+    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+  };
+
   const handleInfo = (req: http.IncomingMessage, res: http.ServerResponse, next: () => void) => {
     const url = new URL(req.url ?? '', 'http://localhost');
+    if (url.pathname === '/__groupsync/token' && req.method === 'POST') {
+      // Only the machine running the dev server may change the saved token
+      if (!isLoopback(req)) {
+        res.statusCode = 403;
+        return res.end();
+      }
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        try {
+          const { token } = JSON.parse(body) as { token?: string | null };
+          if (token && !/^[A-Za-z0-9._~+/=-]{8,4096}$/.test(token)) throw new Error('bad token');
+          writeSavedToken(rootDir, token || null);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.statusCode = 400;
+          res.end();
+        }
+      });
+      return;
+    }
     if (url.pathname !== '/__groupsync/info') return next();
     const target = parseTarget(url.searchParams.get('target'));
     const ip = pickLanIp(target?.host ?? null);
@@ -136,6 +207,8 @@ export function groupSyncPlugin(): Plugin {
     res.end(
       JSON.stringify({
         clickTrackUrl: ip ? `http://${ip}:${MEDIA_PORT}/${TRACK_NAME}` : null,
+        tokenSaved: !!readSavedToken(rootDir),
+        canSaveToken: isLoopback(req),
       })
     );
   };
@@ -143,12 +216,14 @@ export function groupSyncPlugin(): Plugin {
   const startMediaServer = () => {
     if (mediaServer) return;
     mediaServer = http.createServer((req, res) => {
-      if (req.url?.split('?')[0] !== `/${TRACK_NAME}`) {
+      const reqUrl = new URL(req.url ?? '', 'http://localhost');
+      if (reqUrl.pathname !== `/${TRACK_NAME}`) {
         res.statusCode = 404;
         res.end();
         return;
       }
-      const track = buildTrack();
+      const wanted = Number(reqUrl.searchParams.get('seconds')) || MAX_TRACK_SECONDS;
+      const track = buildTrack(Math.min(MAX_TRACK_SECONDS, Math.max(30, Math.round(wanted))));
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('Accept-Ranges', 'bytes');
       const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? '');
@@ -173,12 +248,14 @@ export function groupSyncPlugin(): Plugin {
   return {
     name: 'groupsync',
     configureServer(server) {
+      rootDir = server.config.root;
       startMediaServer();
       server.middlewares.use(handleInfo);
       server.httpServer?.on('upgrade', handleUpgrade);
       server.httpServer?.on('close', () => mediaServer?.close());
     },
     configurePreviewServer(server) {
+      rootDir = server.config.root;
       startMediaServer();
       server.middlewares.use(handleInfo);
       server.httpServer?.on('upgrade', handleUpgrade);
