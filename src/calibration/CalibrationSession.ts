@@ -10,10 +10,9 @@
 import { AudioDetector, createAudioDetector } from './AudioDetector';
 import { ClickTrackGenerator } from './ClickTrackGenerator';
 import { OffsetCalculator } from './OffsetCalculator';
-import { SendspinSyncClient, createSendspinSyncClient } from './SendspinSyncClient';
 import type { ClickDetection, CalibrationResult, CalibrationConfig } from '../types';
 import { DEFAULT_CALIBRATION_CONFIG } from '../types';
-import { maClient } from '../ma-client';
+import { maClient, resolveClickTrackUrl } from '../ma-client';
 
 export type CalibrationEventType =
   | 'started'
@@ -36,7 +35,6 @@ export class CalibrationSession {
   private audioDetector: AudioDetector | null = null;
   private clickTrackGenerator: ClickTrackGenerator;
   private offsetCalculator: OffsetCalculator;
-  private syncClient: SendspinSyncClient | null = null;
   private config: CalibrationConfig;
 
   private playerId: string;
@@ -50,10 +48,6 @@ export class CalibrationSession {
   // Audio playback
   private audioContext: AudioContext | null = null;
   private audioSource: AudioBufferSourceNode | null = null;
-
-  // Clock sync - playback start time in server microseconds
-  private playbackStartServerTime: number = 0;
-  private useClockSync: boolean = true;
 
   constructor(
     playerId: string,
@@ -91,80 +85,11 @@ export class CalibrationSession {
     this.isRunning = true;
 
     try {
-      // Step 1: Connect to Sendspin for clock synchronization
-      this.emit({ type: 'clock_syncing' });
-      console.log('[CalibrationSession] Connecting to Sendspin for clock sync...');
-      console.log('[CalibrationSession] Server URL:', this.serverUrl);
+      // NOTE: we deliberately do NOT open a Sendspin connection here. Every
+      // client/hello registers a new player in Music Assistant ("GroupSync"
+      // ghosts), and the clock offset was never used by the measurement.
 
-      this.syncClient = createSendspinSyncClient('GroupSync');
-
-      try {
-        await this.syncClient.connect(this.serverUrl);
-        console.log('[CalibrationSession] Sendspin connection established');
-
-        // Wait for clock sync to converge (up to 3 seconds)
-        const synced = await this.syncClient.waitForSync(3000);
-
-        if (synced) {
-          const status = this.syncClient.clock.getStatus();
-          console.log(
-            `[CalibrationSession] Clock synced: offset=${status.offsetMicroseconds.toFixed(0)}μs ` +
-            `(±${status.offsetUncertaintyMicroseconds.toFixed(0)}μs)`
-          );
-          this.useClockSync = true;
-        } else {
-          console.warn('[CalibrationSession] Clock sync did not converge, using fallback timing');
-          this.useClockSync = false;
-
-          // Emit non-converged status
-          const clockStatus = this.syncClient.clock.getStatus();
-          this.emit({
-            type: 'clock_synced',
-            data: {
-              success: false,
-              error: 'Clock sync did not converge in time',
-              offsetMs: clockStatus.offsetMicroseconds / 1000,
-              uncertaintyMs: clockStatus.offsetUncertaintyMicroseconds / 1000,
-              measurements: clockStatus.measurementCount,
-            },
-          });
-        }
-      } catch (syncError) {
-        const errorMsg = syncError instanceof Error ? syncError.message : String(syncError);
-        console.warn('[CalibrationSession] Clock sync failed:', errorMsg);
-        console.warn('[CalibrationSession] Using fallback timing (local clock only)');
-        this.useClockSync = false;
-
-        // Emit failure with error message
-        this.emit({
-          type: 'clock_synced',
-          data: {
-            success: false,
-            error: errorMsg,
-            offsetMs: null,
-            uncertaintyMs: null,
-            measurements: 0,
-          },
-        });
-      }
-
-      // Only emit success status here (failure is emitted in catch block)
-      if (this.useClockSync) {
-        const clockStatus = this.syncClient?.clock.getStatus();
-        this.emit({
-          type: 'clock_synced',
-          data: {
-            success: true,
-            offsetMs: clockStatus ? clockStatus.offsetMicroseconds / 1000 : null,
-            uncertaintyMs: clockStatus?.offsetUncertaintyMicroseconds
-              ? clockStatus.offsetUncertaintyMicroseconds / 1000
-              : null,
-            measurements: clockStatus?.measurementCount ?? 0,
-          },
-        });
-      }
-
-      // Step 2: Initialize audio detector (microphone)
+      // Step 1: Initialize audio detector (microphone)
       this.audioDetector = createAudioDetector({
         sampleRate: this.config.sampleRate,
         expectedFrequencies: this.config.frequencies,
@@ -185,26 +110,14 @@ export class CalibrationSession {
       // Small delay to ensure mic is ready, then start playing click track
       await new Promise((resolve) => setTimeout(resolve, 500));
 
-      // Step 3: Play click track through Music Assistant
+      // Step 2: Play click track through Music Assistant
       console.log('[CalibrationSession] Starting click track playback via Music Assistant...');
 
-      // Build the URL to the click track served by this app
-      // NOTE: This URL must be accessible from the Music Assistant server!
-      // Set VITE_MEDIA_BASE_URL (e.g. http://192.168.1.28:5173) when MA can't reach
-      // this page's origin (localhost, or a self-signed https dev cert).
-      const mediaBase = (import.meta.env.VITE_MEDIA_BASE_URL as string | undefined) || window.location.origin;
-      const clickTrackUrl = `${mediaBase.replace(/\/$/, '')}/calibration-clicks.wav`;
+      // Plain-HTTP URL on this machine's LAN IP (served by the dev server) so MA can fetch it
+      const clickTrackUrl = await resolveClickTrackUrl(this.serverUrl);
       console.log('[CalibrationSession] Click track URL:', clickTrackUrl);
 
       let playbackMethod: 'music_assistant' | 'local' = 'music_assistant';
-
-      // Record the server time when we start playback (for offset calculation)
-      if (this.useClockSync && this.syncClient) {
-        this.playbackStartServerTime = this.syncClient.clock.clientToServerTime(
-          this.syncClient.clock.getCurrentTimeMicroseconds()
-        );
-        console.log(`[CalibrationSession] Playback start server time: ${this.playbackStartServerTime}μs`);
-      }
 
       try {
         // Tell Music Assistant to play the click track on the selected player
@@ -230,7 +143,6 @@ export class CalibrationSession {
         data: {
           method: playbackMethod,
           url: clickTrackUrl,
-          clockSynced: this.useClockSync,
         },
       });
 
@@ -428,10 +340,6 @@ export class CalibrationSession {
     // Stop microphone
     this.audioDetector?.dispose();
     this.audioDetector = null;
-
-    // Disconnect clock sync client
-    this.syncClient?.disconnect();
-    this.syncClient = null;
   }
 }
 

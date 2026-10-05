@@ -4,6 +4,7 @@
  */
 
 import type { MAMessage, Player } from '../types';
+import { buildMaWebSocketUrl } from './endpoints';
 
 type MessageHandler = (message: MAMessage) => void;
 type ConnectionHandler = () => void;
@@ -215,9 +216,14 @@ export class MAWebSocketClient {
       this.accessToken = tokenToUse;
       this.authenticated = true;
       console.log('[MA] Authenticated with token');
+      try {
+        localStorage.setItem('ma_access_token', tokenToUse);
+      } catch {
+        // localStorage not available
+      }
       return true;
     } catch (error) {
-      console.log('[MA] Token authentication failed:', error);
+      console.log('[MA] Token authentication failed:', error instanceof Error ? error.message : 'error');
       this.clearStoredToken();
       return false;
     }
@@ -400,26 +406,17 @@ export class MAWebSocketClient {
     });
   }
 
+  /**
+   * Remove a (disconnected) player's configuration from Music Assistant
+   */
+  async removePlayerConfig(playerId: string): Promise<void> {
+    await this.sendCommand('config/players/remove', { player_id: playerId });
+  }
+
   // ==================== Private Methods ====================
 
   private buildWebSocketUrl(serverUrl: string): string {
-    // Remove trailing slash
-    let url = serverUrl.replace(/\/$/, '');
-
-    // Add protocol if missing
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `http://${url}`;
-    }
-
-    // Parse URL
-    const parsed = new URL(url);
-
-    // Build WebSocket URL
-    // If current page is HTTPS, we MUST use WSS (browser security requirement)
-    // Otherwise, use the protocol based on the server URL
-    const isPageSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
-    const wsProtocol = isPageSecure || parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${wsProtocol}//${parsed.host}/ws`;
+    return buildMaWebSocketUrl(serverUrl, '/ws');
   }
 
   private handleMessage(data: string): void {

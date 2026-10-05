@@ -1,8 +1,29 @@
 import { usePlayersStore, useCalibrationStore, useConnectionStore } from '../store';
+import { useState } from 'react';
 import { maClient } from '../ma-client';
 
 export function PlayerList() {
-  const { players, selectedPlayerIds, togglePlayerSelection, loading, reset: resetPlayers } = usePlayersStore();
+  const { players, setPlayers, selectedPlayerIds, togglePlayerSelection, loading, reset: resetPlayers } = usePlayersStore();
+  const [cleaning, setCleaning] = useState(false);
+  // Leftovers from older GroupSync versions that registered a Sendspin player on every run
+  const ghostPlayers = players.filter((p) => p.name === 'GroupSync');
+
+  const handleCleanup = async () => {
+    if (!window.confirm(`Remove ${ghostPlayers.length} "GroupSync" player(s) from Music Assistant? Other players are not touched.`)) return;
+    setCleaning(true);
+    for (const ghost of ghostPlayers) {
+      try {
+        await maClient.removePlayerConfig(ghost.player_id);
+      } catch (e) {
+        console.warn('[UI] Could not remove', ghost.player_id, e);
+      }
+    }
+    try {
+      setPlayers(await maClient.getAllPlayers());
+    } finally {
+      setCleaning(false);
+    }
+  };
   const { setPhase } = useCalibrationStore();
   const { reset: resetConnection } = useConnectionStore();
 
@@ -45,8 +66,23 @@ export function PlayerList() {
             </div>
           )}
 
+          {ghostPlayers.length > 0 && (
+            <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm flex items-center gap-3">
+              <span className="flex-1">
+                {ghostPlayers.length} leftover &quot;GroupSync&quot; player(s) in Music Assistant.
+              </span>
+              <button
+                onClick={handleCleanup}
+                disabled={cleaning}
+                className="px-3 py-1 bg-yellow-700/40 hover:bg-yellow-700/60 rounded disabled:opacity-50"
+              >
+                {cleaning ? 'Removing...' : 'Remove'}
+              </button>
+            </div>
+          )}
+
           <div className="space-y-3">
-            {players.map((player) => {
+            {players.filter((p) => p.name !== 'GroupSync').map((player) => {
               const isAvailable = player.available !== false && player.powered !== false;
               const isSelected = selectedPlayerIds.includes(player.player_id);
 

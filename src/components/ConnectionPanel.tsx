@@ -24,6 +24,7 @@ export function ConnectionPanel() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [authenticating, setAuthenticating] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
 
   const fetchPlayers = async (): Promise<boolean> => {
     setLoading(true);
@@ -83,13 +84,7 @@ export function ConnectionPanel() {
       }
       // If fetchPlayers failed due to auth, needsAuth is already set
     } catch (err) {
-      let message = err instanceof Error ? err.message : 'Connection failed';
-
-      // Check for mixed content / WSS error
-      if (message.includes('insecure WebSocket') || message.includes('SecurityError')) {
-        message = 'Cannot connect: This page uses HTTPS but Music Assistant uses plain WebSocket. ' +
-          'Either access MA via HTTPS/WSS, or run GroupSync on HTTP (but mic won\'t work on mobile).';
-      }
+      const message = err instanceof Error ? err.message : 'Connection failed';
 
       setError(message);
       console.error('[MA] Connection error:', err);
@@ -113,6 +108,29 @@ export function ConnectionPanel() {
       const message = err instanceof Error ? err.message : 'Login failed';
       setError(message);
       console.error('[MA] Login error:', err);
+    } finally {
+      setAuthenticating(false);
+    }
+  };
+
+  const handleTokenLogin = async () => {
+    const token = tokenInput.trim();
+    if (!token) return;
+
+    setAuthenticating(true);
+    setError(null);
+
+    try {
+      const ok = await maClient.authenticateWithToken(token);
+      if (!ok) {
+        setError('Token was rejected by Music Assistant. Create a new long-lived token and try again.');
+        return;
+      }
+      setTokenInput('');
+      setNeedsAuth(false);
+      if (await fetchPlayers()) {
+        setConnected(true);
+      }
     } finally {
       setAuthenticating(false);
     }
@@ -178,6 +196,42 @@ export function ConnectionPanel() {
                          focus:ring-2 focus:ring-primary focus:border-transparent
                          placeholder-gray-500 disabled:opacity-50"
             />
+          </div>
+
+          <div className="relative text-center text-xs text-text-muted">
+            <span>or use an access token</span>
+          </div>
+
+          <div>
+            <label htmlFor="token" className="block text-sm font-medium mb-2">
+              Long-lived access token
+            </label>
+            <input
+              id="token"
+              type="password"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && tokenInput.trim() && !authenticating) handleTokenLogin();
+              }}
+              placeholder="Paste token"
+              disabled={authenticating}
+              autoComplete="off"
+              className="w-full px-4 py-3 bg-surface border border-gray-600 rounded-lg
+                         focus:ring-2 focus:ring-primary focus:border-transparent
+                         placeholder-gray-500 disabled:opacity-50"
+            />
+            <p className="mt-1 text-xs text-text-muted">
+              In Music Assistant: profile &rarr; Long-lived access tokens. Stored only in this browser.
+            </p>
+            <button
+              onClick={handleTokenLogin}
+              disabled={authenticating || !tokenInput.trim()}
+              className="mt-2 w-full py-3 px-4 bg-primary hover:bg-primary-dark disabled:opacity-50
+                         rounded-lg font-medium transition-colors"
+            >
+              Connect with token
+            </button>
           </div>
 
           {error && (

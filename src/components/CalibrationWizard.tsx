@@ -37,6 +37,16 @@ export function CalibrationWizard() {
     syncing: false,
     synced: false,
   });
+  // Auto-push is opt-in: by default we only show the value so the user enters it themselves
+  const [autoPush, setAutoPush] = useState(() => {
+    try {
+      return localStorage.getItem('groupsync_auto_push') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const autoPushRef = useRef(autoPush);
+  autoPushRef.current = autoPush;
   const [isPushing, setIsPushing] = useState(false);
   const [pushResults, setPushResults] = useState<PushResult[] | null>(null);
   const sessionRef = useRef<CalibrationSession | null>(null);
@@ -133,6 +143,11 @@ export function CalibrationWizard() {
             const result = event.data as CalibrationResult;
             setResult(playerId, result);
             setPhase('results');
+            if (autoPushRef.current) {
+              pushSyncOffsets({ [playerId]: result }).then(setPushResults).catch((e) => {
+                setError(e instanceof Error ? e.message : 'Auto-push failed');
+              });
+            }
             break;
           }
 
@@ -394,7 +409,7 @@ export function CalibrationWizard() {
             <div className="text-6xl mb-4">✅</div>
             <h2 className="text-2xl font-bold mb-2">Calibration Complete</h2>
             <p className="text-text-muted">
-              Review and adjust the offsets below, then apply them to your players.
+              Enter each value in Music Assistant (Player settings &rarr; Audio &rarr; sync delay), or push them from here.
             </p>
           </div>
 
@@ -430,6 +445,12 @@ export function CalibrationWizard() {
                     <span>0</span>
                     <span>+100ms (later)</span>
                   </div>
+                  <button
+                    onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
+                    className="mt-2 text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                  >
+                    Copy {Math.round(result.offsetMs)}
+                  </button>
                   <div className="flex justify-between text-xs text-text-muted mt-2">
                     <span>Confidence: {Math.round(result.confidence * 100)}%</span>
                     <span>{result.detectedClicks}/{result.totalClicks} clicks</span>
@@ -438,6 +459,22 @@ export function CalibrationWizard() {
               ))}
             </div>
           )}
+
+          <label className="flex items-center gap-2 text-sm text-text-muted">
+            <input
+              type="checkbox"
+              checked={autoPush}
+              onChange={(e) => {
+                setAutoPush(e.target.checked);
+                try {
+                  localStorage.setItem('groupsync_auto_push', e.target.checked ? '1' : '0');
+                } catch {
+                  // ignore
+                }
+              }}
+            />
+            Automatically push each result to Music Assistant
+          </label>
 
           {/* Push Results */}
           {pushResults && (
@@ -490,7 +527,7 @@ export function CalibrationWizard() {
               ) : pushResults?.every((r) => r.success) ? (
                 'Done!'
               ) : (
-                'Apply Offsets'
+                'Push to Music Assistant'
               )}
             </button>
           </div>

@@ -9,6 +9,7 @@
 
 import { ClockSynchronizer, clockSynchronizer } from './ClockSynchronizer';
 import { maClient } from '../ma-client';
+import { buildMaWebSocketUrl } from '../ma-client/endpoints';
 
 export type SendspinSyncState = 'disconnected' | 'connecting' | 'handshaking' | 'syncing' | 'synced';
 
@@ -222,17 +223,7 @@ export class SendspinSyncClient {
   }
 
   private buildWebSocketUrl(serverUrl: string): string {
-    let url = serverUrl.replace(/\/$/, '');
-
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `http://${url}`;
-    }
-
-    const parsed = new URL(url);
-    const isPageSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
-    const wsProtocol = isPageSecure || parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-
-    return `${wsProtocol}//${parsed.host}/sendspin`;
+    return buildMaWebSocketUrl(serverUrl, '/sendspin');
   }
 
   private generateUUID(): string {
