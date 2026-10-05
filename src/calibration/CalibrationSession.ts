@@ -17,6 +17,8 @@ import { maClient, resolveClickTrackUrl } from '../ma-client';
 export interface CalibrationRoom {
   playerId: string;
   name: string;
+  /** Mute state before calibration; restored afterwards */
+  muted?: boolean;
 }
 
 export type CalibrationEventType =
@@ -36,8 +38,8 @@ export interface CalibrationEvent {
 
 type CalibrationEventCallback = (event: CalibrationEvent) => void;
 
-/** Seconds of settling time after tapping "measure here" before clicks count */
-const GUARD_S = 1;
+/** Seconds of settling time after the other players are muted before clicks count */
+const GUARD_S = 1.5;
 /** Seconds of recording that count for one room */
 const WINDOW_S = 10;
 /** Sendspin/MA can take a while to start the stream; give up waiting after this */
@@ -57,6 +59,8 @@ export class CalibrationSession {
   private windowTimer: ReturnType<typeof setTimeout> | null = null;
   private measurements: Measurement[] = [];
   private playing = false;
+  private measuring = false;
+  private mutesChanged = false;
   private isRunning = false;
   private heardTimes = new Set<number>();
   private lastHeardCount = 0;
@@ -116,21 +120,63 @@ export class CalibrationSession {
     }
   }
 
-  /** Begin the measurement window for a room (the user is standing there now). */
-  measureRoom(playerId: string): void {
-    if (!this.isRunning || this.windowTimer) return;
+  /**
+   * Begin the measurement window for a room (the user is standing there now).
+   * Every other room is muted for the window so only this player is heard
+   * (speakers sharing a room play the same clicks and can't be told apart),
+   * then mute states are restored.
+   */
+  async measureRoom(playerId: string): Promise<void> {
+    if (!this.isRunning || this.windowTimer || this.measuring) return;
+    this.measuring = true;
+    this.emit({ type: 'room_measuring', data: { playerId, seconds: GUARD_S + WINDOW_S } });
+
+    await this.applyMutes(playerId);
+    if (!this.isRunning) {
+      // Cancelled while muting: don't leave the players muted
+      await this.restoreMutes();
+      return;
+    }
+
     const startTime = this.recorder.elapsed + GUARD_S;
     const endTime = startTime + WINDOW_S;
     this.measurements.push({ playerId, startTime, endTime });
-    this.emit({
-      type: 'room_measuring',
-      data: { playerId, seconds: GUARD_S + WINDOW_S },
-    });
-    this.windowTimer = setTimeout(() => {
+    this.windowTimer = setTimeout(async () => {
       this.windowTimer = null;
       const clicks = this.countClicks(startTime, endTime);
+      await this.restoreMutes();
+      this.measuring = false;
       this.emit({ type: 'room_measured', data: { playerId, clicks } });
     }, (GUARD_S + WINDOW_S) * 1000 + 300);
+  }
+
+  /** Mute everyone except `playerId` (which is unmuted so it can be heard). */
+  private async applyMutes(playerId: string): Promise<void> {
+    const changes = this.rooms.map(async (room) => {
+      const shouldMute = room.playerId !== playerId;
+      try {
+        await maClient.playerCommand(room.playerId, 'volume_mute', { muted: shouldMute });
+        this.mutesChanged = true;
+      } catch (error) {
+        console.warn('[CalibrationSession] Could not set mute for', room.name, error);
+      }
+    });
+    await Promise.all(changes);
+  }
+
+  /** Put every room back to the mute state it had before calibration. */
+  private async restoreMutes(): Promise<void> {
+    if (!this.mutesChanged) return;
+    this.mutesChanged = false;
+    await Promise.all(
+      this.rooms.map(async (room) => {
+        try {
+          await maClient.playerCommand(room.playerId, 'volume_mute', { muted: room.muted ?? false });
+        } catch (error) {
+          console.warn('[CalibrationSession] Could not restore mute for', room.name, error);
+        }
+      })
+    );
   }
 
   /** Discard the last measurement (e.g. it heard nothing) so the room can be retried. */
@@ -140,6 +186,8 @@ export class CalibrationSession {
       this.windowTimer = null;
     }
     this.measurements.pop();
+    this.measuring = false;
+    void this.restoreMutes();
   }
 
   getLevel(): number {
@@ -299,6 +347,8 @@ export class CalibrationSession {
   private async cleanup(): Promise<void> {
     this.isRunning = false;
     this.stopTimers();
+    this.measuring = false;
+    await this.restoreMutes();
     await this.stopPlayback();
     this.recorder.stop();
   }

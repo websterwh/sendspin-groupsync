@@ -10,10 +10,13 @@ type RoomState = 'waiting' | 'measuring' | 'done' | 'empty';
 export function CalibrationWizard() {
   const { phase, setPhase, results, setResult, clearResults, updateOffset, setError } =
     useCalibrationStore();
-  const { players, selectedPlayerIds } = usePlayersStore();
+  const { players, selectedPlayerIds, makeReference } = usePlayersStore();
   const { serverUrl } = useConnectionStore();
 
-  const selectedPlayers = players.filter((p) => selectedPlayerIds.includes(p.player_id));
+  // In selection order (the first one is the reference room); "Make reference" reorders
+  const selectedPlayers = selectedPlayerIds
+    .map((id) => players.find((p) => p.player_id === id))
+    .filter((p): p is NonNullable<typeof p> => !!p);
 
   // The track must be played on the sync group's leader so every member plays the same stream
   const leaderOf = (playerId: string) => {
@@ -78,7 +81,7 @@ export function CalibrationWizard() {
 
     const session = createCalibrationSession(
       playTarget,
-      selectedPlayers.map((p) => ({ playerId: p.player_id, name: p.name })),
+      selectedPlayers.map((p) => ({ playerId: p.player_id, name: p.name, muted: p.muted })),
       serverUrl
     );
     sessionRef.current = session;
@@ -146,7 +149,7 @@ export function CalibrationWizard() {
     const session = sessionRef.current;
     if (!session || measuring) return;
     setRoomStates((prev) => ({ ...prev, [playerId]: 'measuring' }));
-    setMeasuringLeft(session.windowSeconds + 1);
+    setMeasuringLeft(session.windowSeconds + 3);
     session.measureRoom(playerId);
     if (countdownRef.current) clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
@@ -160,7 +163,7 @@ export function CalibrationWizard() {
   const handleMeasureClosing = () => {
     const session = sessionRef.current;
     if (!session || !firstRoom || measuring) return;
-    setMeasuringLeft(session.windowSeconds + 1);
+    setMeasuringLeft(session.windowSeconds + 3);
     session.measureRoom(firstRoom.player_id);
     if (countdownRef.current) clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
@@ -227,7 +230,7 @@ export function CalibrationWizard() {
               <li>The players must be in one sync group in Music Assistant (so they play the same stream)</li>
               <li>Hold the phone at the same distance (about 1 m) from each speaker</li>
               <li>About 12 seconds per room, plus a return to the first room at the end to correct clock drift</li>
-              <li>Keep the rooms quiet; keep the phone still while measuring</li>
+              <li>Keep the rooms quiet; keep the phone still while measuring. The other players are muted automatically while each room is measured (and restored after), so speakers sharing a room are fine.</li>
             </ul>
           </div>
 
@@ -252,11 +255,44 @@ export function CalibrationWizard() {
             </div>
           )}
 
-          <div className="p-3 bg-surface rounded-lg text-sm">
-            <div className="text-text-muted mb-1">Plays on: <b className="text-white">{nameOf(playTarget)}</b></div>
-            <div className="text-text-muted">
-              Rooms (in order, the first is the reference):{' '}
-              {selectedPlayers.map((p) => p.name).join(' → ') || 'none selected'}
+          <div className="p-3 bg-surface rounded-lg text-sm space-y-3">
+            <div>
+              <div className="text-text-muted">Track plays on (sync group leader):</div>
+              <div className="font-medium">
+                {nameOf(playTarget)}
+                {!selectedPlayers.some((p) => p.player_id === playTarget) && (
+                  <span className="text-xs text-text-muted ml-2">not one of the measured rooms</span>
+                )}
+              </div>
+              <div className="text-xs text-text-muted">Chosen automatically from the group in Music Assistant.</div>
+            </div>
+            <div>
+              <div className="text-text-muted mb-1">Rooms, in measuring order:</div>
+              <div className="space-y-2">
+                {selectedPlayers.map((p, i) => (
+                  <div key={p.player_id} className="flex items-center gap-2">
+                    <span className="flex-1 font-medium">
+                      {p.name}
+                      {i === 0 && <span className="ml-2 text-xs px-1.5 py-0.5 bg-primary/30 rounded">Reference</span>}
+                      {p.player_id === playTarget && (
+                        <span className="ml-2 text-xs px-1.5 py-0.5 bg-gray-700 rounded">Group leader</span>
+                      )}
+                    </span>
+                    {i > 0 && (
+                      <button
+                        onClick={() => makeReference(p.player_id)}
+                        className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                      >
+                        Make reference
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="text-xs text-text-muted mt-2">
+                The reference is measured first and last, and is the baseline the others are compared to.
+                While one room is measured, the other players are muted automatically and restored after.
+              </div>
             </div>
           </div>
 
@@ -326,7 +362,11 @@ export function CalibrationWizard() {
                   <div className="text-xl">{state === 'done' ? '✅' : isMeasuring ? '⏺' : '🔊'}</div>
                   <div className="flex-1">
                     <div className="font-medium">{player.name}</div>
-                    {i === 0 && <div className="text-xs text-text-muted">Reference room</div>}
+                    <div className="text-xs text-text-muted">
+                      {[i === 0 ? 'Reference room' : '', player.player_id === playTarget ? 'Group leader' : '']
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
                   </div>
                   <button
                     onClick={() => handleMeasure(player.player_id)}
