@@ -8,12 +8,14 @@
  */
 
 import { ClockSynchronizer, clockSynchronizer } from './ClockSynchronizer';
+import { maClient } from '../ma-client';
 
 export type SendspinSyncState = 'disconnected' | 'connecting' | 'handshaking' | 'syncing' | 'synced';
 
 interface SendspinMessage {
   type: string;
   payload?: Record<string, unknown>;
+  token?: string;
 }
 
 interface ServerHelloPayload {
@@ -106,10 +108,18 @@ export class SendspinSyncClient {
         }, 10000);
 
         this.ws.onopen = () => {
-          console.log('[SendspinSync] WebSocket connected, sending client/hello');
           clearTimeout(timeout);
           this.setState('handshaking');
-          this.sendClientHello();
+          // MA's /sendspin proxy requires {type:'auth', token} as the first frame
+          // and answers {type:'auth_ok'} before it will proxy client/hello.
+          const token = maClient.token;
+          if (token) {
+            console.log('[SendspinSync] WebSocket connected, sending auth');
+            this.sendMessage({ type: 'auth', token });
+          } else {
+            console.log('[SendspinSync] WebSocket connected (no token), sending client/hello');
+            this.sendClientHello();
+          }
         };
 
         this.ws.onmessage = (event) => {
@@ -238,6 +248,11 @@ export class SendspinSyncClient {
       const message = JSON.parse(data) as SendspinMessage;
 
       switch (message.type) {
+        case 'auth_ok':
+          console.log('[SendspinSync] Authenticated, sending client/hello');
+          this.sendClientHello();
+          break;
+
         case 'server/hello':
           if (message.payload) {
             this.handleServerHello(message.payload as unknown as ServerHelloPayload);

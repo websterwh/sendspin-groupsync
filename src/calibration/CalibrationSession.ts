@@ -190,7 +190,10 @@ export class CalibrationSession {
 
       // Build the URL to the click track served by this app
       // NOTE: This URL must be accessible from the Music Assistant server!
-      const clickTrackUrl = `${window.location.origin}/calibration-clicks.wav`;
+      // Set VITE_MEDIA_BASE_URL (e.g. http://192.168.1.28:5173) when MA can't reach
+      // this page's origin (localhost, or a self-signed https dev cert).
+      const mediaBase = (import.meta.env.VITE_MEDIA_BASE_URL as string | undefined) || window.location.origin;
+      const clickTrackUrl = `${mediaBase.replace(/\/$/, '')}/calibration-clicks.wav`;
       console.log('[CalibrationSession] Click track URL:', clickTrackUrl);
 
       let playbackMethod: 'music_assistant' | 'local' = 'music_assistant';

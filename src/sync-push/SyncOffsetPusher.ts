@@ -169,10 +169,9 @@ async function pushViaConfigApi(
       'config/players/save',
       {
         player_id: playerId,
+        // MA's per-player sync delay (CONF_SYNC_ADJUST): integer ms, range -500..500
         values: {
-          sync_offset_ms: offsetMs,
-          sync_offset_source: 'groupsync',
-          sync_offset_timestamp: Date.now(),
+          sync_adjust: Math.max(-500, Math.min(500, Math.round(offsetMs))),
         },
       },
       timeoutMs

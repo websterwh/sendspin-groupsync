@@ -154,6 +154,13 @@ export class MAWebSocketClient {
   }
 
   /**
+   * Current access token (for the Sendspin proxy auth frame)
+   */
+  get token(): string | null {
+    return this.accessToken || this.getStoredToken();
+  }
+
+  /**
    * Check if authentication is required
    */
   get needsAuth(): boolean {
