@@ -68,6 +68,8 @@ export function CalibrationWizard() {
   const [driftPpm, setDriftPpm] = useState<number | null>(null);
   const [audioGaps, setAudioGaps] = useState(0);
   const [muteProblems, setMuteProblems] = useState<{ name: string; reason: string }[]>([]);
+  // Speakers whose value the user changed by hand; pushed even when they're within the in-sync margin
+  const [edited, setEdited] = useState<Set<string>>(new Set());
 
   // Auto-push is opt-in: by default we only show the value so the user enters it themselves
   const [autoPush, setAutoPush] = useState(() => {
@@ -98,6 +100,7 @@ export function CalibrationWizard() {
     if (!firstRoom || !playTarget) return;
     setError(null);
     setReadings({});
+    setEdited(new Set());
     setMeasuringId(null);
     setLastOutcome(null);
     setMuteProblems([]);
@@ -219,17 +222,22 @@ export function CalibrationWizard() {
     }
   };
 
-  // Only push speakers that need a change and whose current MA value is known (never overwrite blindly)
+  // Push speakers that are out of sync, plus any in-sync one whose value the user edited by hand.
+  // Speakers with no known delay setting can't be pushed.
   const pushable = (all: Record<string, CalibrationResult>) =>
     Object.fromEntries(
       Object.entries(all).filter(
-        ([, r]) => !r.isReference && r.arrivalMs !== undefined && Math.abs(r.arrivalMs) > IN_SYNC_MS && !!r.setting
+        ([id, r]) =>
+          !r.isReference &&
+          r.arrivalMs !== undefined &&
+          !!r.setting &&
+          (Math.abs(r.arrivalMs) > IN_SYNC_MS || edited.has(id))
       )
     );
 
   const handleApplyOffsets = async () => {
     if (Object.keys(pushable(results)).length === 0) {
-      setError('Nothing to push: everything is in sync, or no delay setting was found for the speakers that are out.');
+      setError('Nothing to push. Everything is in sync; edit a value to push it anyway.');
       return;
     }
 
@@ -511,43 +519,50 @@ export function CalibrationWizard() {
 
                     {result.isReference ? null : arrival === undefined ? (
                       <p className="text-red-300">No clicks heard. Measure again.</p>
-                    ) : inSync ? (
-                      <p className="text-lg font-semibold text-green-300">In sync (±{IN_SYNC_MS} ms)</p>
                     ) : (
                       <>
-                        <p className={`text-2xl font-bold ${arrival > 0 ? 'text-orange-300' : 'text-blue-300'}`}>
+                        <p
+                          className={`text-2xl font-bold ${
+                            inSync ? 'text-green-300' : arrival > 0 ? 'text-orange-300' : 'text-blue-300'
+                          }`}
+                        >
                           {ms} ms {arrival > 0 ? 'late' : 'early'}
+                          {inSync && <span className="ml-2 text-sm font-normal">in sync (±{IN_SYNC_MS})</span>}
                         </p>
                         <p className="text-sm text-text-muted">
-                          Play {ms} ms {arrival > 0 ? 'earlier' : 'later'}
+                          {inSync ? 'Optional: play' : 'Play'} {ms} ms {arrival > 0 ? 'earlier' : 'later'}
                         </p>
                         {result.setting ? (
-                          <div className="flex items-center gap-2 text-sm pt-1">
-                            <span className="text-text-muted">
-                              {result.setting.label}: {result.setting.current} →
-                            </span>
-                            <input
-                              type="number"
-                              step="1"
-                              value={result.offsetMs}
-                              onChange={(e) => updateOffset(playerId, parseFloat(e.target.value) || 0)}
-                              className="w-20 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
-                            />
-                            <button
-                              onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
-                              className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
-                            >
-                              Copy
-                            </button>
-                          </div>
+                          <>
+                            <div className="flex items-center gap-2 text-sm pt-1">
+                              <span className="text-text-muted">
+                                {result.setting.label}: {result.setting.current} →
+                              </span>
+                              <input
+                                type="number"
+                                step="1"
+                                value={result.offsetMs}
+                                onChange={(e) => {
+                                  updateOffset(playerId, parseFloat(e.target.value) || 0);
+                                  setEdited((prev) => new Set(prev).add(playerId));
+                                }}
+                                className="w-20 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
+                              />
+                              <button
+                                onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
+                                className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                              >
+                                Copy
+                              </button>
+                            </div>
+                            <p className="text-xs text-text-muted">
+                              Higher = plays {result.setting.higherIsEarlier ? 'earlier' : 'later (unverified)'}
+                              {result.clamped && ` · limit ${result.setting.min} to ${result.setting.max}`}
+                              {inSync && !edited.has(playerId) && ' · not pushed unless you edit it'}
+                            </p>
+                          </>
                         ) : (
                           <p className="text-xs text-text-muted">No delay setting found in MA for this speaker.</p>
-                        )}
-                        {result.setting && (
-                          <p className="text-xs text-text-muted">
-                            Higher = plays {result.setting.higherIsEarlier ? 'earlier' : 'later (unverified)'}
-                            {result.clamped && ` · limit ${result.setting.min} to ${result.setting.max}`}
-                          </p>
                         )}
                       </>
                     )}
