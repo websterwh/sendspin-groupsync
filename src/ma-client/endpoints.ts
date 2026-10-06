@@ -44,6 +44,7 @@ export const ENV_TOKEN_PLACEHOLDER = '__GROUPSYNC_ENV_TOKEN__';
 interface DevServerInfo {
   clickTrackUrl?: string | null;
   songUrlBase?: string | null;
+  songStats?: { requests: number; lastAgoS: number | null; lastIp: string; lastName: string };
   tokenSaved?: boolean;
   canSaveToken?: boolean;
   defaultServer?: string | null;
@@ -106,6 +107,11 @@ export async function fetchSong(name: string): Promise<ArrayBuffer> {
   const res = await fetch(`${basePath()}__groupsync/song/${encodeURIComponent(name)}`);
   if (!res.ok) throw new Error(`Couldn't load ${name} (${res.status})`);
   return res.arrayBuffer();
+}
+
+/** What Music Assistant has asked this server for so far (song test diagnostics) */
+export async function getSongStats(serverUrl: string): Promise<{ requests: number; lastAgoS: number | null; lastIp: string } | null> {
+  return (await getDevServerInfo(serverUrl))?.songStats ?? null;
 }
 
 /** The plain-HTTP address Music Assistant plays the song from */

@@ -223,7 +223,10 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
         <button onClick={() => log.download()} className="flex-1 py-2 px-3 bg-surface hover:bg-gray-700 rounded-lg">
           Download log
         </button>
-        <button onClick={async () => setCopied((await log.copy()) ? 'Copied' : 'Copy failed')} className="flex-1 py-2 px-3 bg-surface hover:bg-gray-700 rounded-lg">
+        <button onClick={async () => {
+            setCopied((await log.copy()) ? 'Copied' : 'Copy failed');
+            setTimeout(() => setCopied(null), 2000);
+          }} className="flex-1 py-2 px-3 bg-surface hover:bg-gray-700 rounded-lg">
           {copied ?? 'Copy log'}
         </button>
       </div>

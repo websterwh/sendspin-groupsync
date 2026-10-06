@@ -51,6 +51,8 @@ const trackCache = new Map<number, Buffer>();
 
 /** What Music Assistant has requested from the click-track server (shown on the page while waiting) */
 const trackStats = { requests: 0, lastAt: 0, lastIp: '', lastRange: '' };
+/** Requests for songs on the plain-HTTP media port, i.e. what Music Assistant asked for */
+const songStats = { requests: 0, lastAt: 0, lastIp: '', lastName: '', bytes: 0 };
 
 /** Placeholder the page sends instead of the real token; swapped in by the proxy so the token never reaches the browser */
 const TOKEN_PLACEHOLDER = '__GROUPSYNC_ENV_TOKEN__';
@@ -258,6 +260,12 @@ export function createGroupSyncCore(options: CoreOptions) {
         tokenSaved: !!getSetting('MA_TOKEN'),
         defaultServer: getSetting('MA_URL'),
         canSaveToken: canWrite(req),
+        songStats: {
+          requests: songStats.requests,
+          lastAgoS: songStats.lastAt ? Math.round((Date.now() - songStats.lastAt) / 1000) : null,
+          lastIp: songStats.lastIp,
+          lastName: songStats.lastName,
+        },
         trackStats: {
           requests: trackStats.requests,
           lastAgoS: trackStats.lastAt ? Math.round((Date.now() - trackStats.lastAt) / 1000) : null,
@@ -277,10 +285,17 @@ export function createGroupSyncCore(options: CoreOptions) {
   };
 
   /** Serve one file from the music folder (only names that are in the listing), with byte ranges */
-  const serveSong = (req: http.IncomingMessage, res: http.ServerResponse, name: string) => {
+  const serveSong = (req: http.IncomingMessage, res: http.ServerResponse, name: string, fromPlayer = false) => {
     if (!musicDir || !listSongs().includes(name)) {
       res.statusCode = 404;
       return res.end();
+    }
+    if (fromPlayer) {
+      songStats.requests++;
+      songStats.lastAt = Date.now();
+      songStats.lastIp = (req.socket.remoteAddress ?? '').replace('::ffff:', '');
+      songStats.lastName = name;
+      console.log(`[groupsync] ${songStats.lastIp} requested song "${name}" ${req.headers.range ?? ''}`);
     }
     const file = path.join(musicDir, name);
     const size = fs.statSync(file).size;
@@ -330,7 +345,7 @@ export function createGroupSyncCore(options: CoreOptions) {
     mediaServer = http.createServer((req, res) => {
       const reqUrl = new URL(req.url ?? '', 'http://localhost');
       if (reqUrl.pathname === `/${TRACK_NAME}`) return serveTrack(req, res, reqUrl);
-      if (reqUrl.pathname.startsWith('/song/')) return serveSong(req, res, decodeURIComponent(reqUrl.pathname.slice(6)));
+      if (reqUrl.pathname.startsWith('/song/')) return serveSong(req, res, decodeURIComponent(reqUrl.pathname.slice(6)), true);
       res.statusCode = 404;
       res.end();
     });

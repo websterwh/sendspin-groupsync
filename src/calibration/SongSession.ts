@@ -13,7 +13,7 @@
  */
 import { MicRecorder } from './MicRecorder';
 import { MuteController, type MuteProblem } from './muting';
-import { maClient, fetchSong, resolveSongUrl } from '../ma-client';
+import { maClient, fetchSong, resolveSongUrl, getSongStats } from '../ma-client';
 import { RefTracker, findOffset, pickPeaks, toMono, REF_FRAME, type RefCurve, type RefPeak } from './RefDelay';
 import type { RecorderLike } from './LiveDriftSession';
 
@@ -88,6 +88,8 @@ export class SongSession {
   /** Where A's room echoes sit relative to its direct sound (learned with A alone) */
   private patternA: number[] = [];
   private recent: number[] = [];
+  private songUrl = '';
+  private requestsBefore = 0;
 
   constructor(
     queueId: string,
@@ -135,6 +137,8 @@ export class SongSession {
 
       await this.mutes.set(new Set([this.b, ...this.others].map((r) => r.playerId)));
       const url = await resolveSongUrl(this.serverUrl, this.songName);
+      this.songUrl = url;
+      this.requestsBefore = (await getSongStats(this.serverUrl))?.requests ?? 0;
       await maClient.playMedia(this.queueId, url, 'replace');
       this.playing = true;
       const playedAt = this.recorder.elapsed;
@@ -154,27 +158,72 @@ export class SongSession {
 
   // ==================== stages ====================
 
+  /** Explain, from what Music Assistant did, why the song may not be playing */
+  private async diagnose(): Promise<string> {
+    const stats = await getSongStats(this.serverUrl);
+    let state = '';
+    try {
+      const p = await maClient.getPlayer(this.queueId);
+      state = p.playback_state ?? p.state ?? '';
+    } catch {
+      // ignore
+    }
+    const asked = (stats?.requests ?? 0) - this.requestsBefore;
+    const parts: string[] = [];
+    if (asked <= 0) {
+      parts.push(`Music Assistant never fetched the song from ${this.songUrl}. It must be able to reach this computer on that port (firewall?).`);
+    } else {
+      parts.push(`Music Assistant fetched the song ${asked} time${asked === 1 ? '' : 's'}.`);
+    }
+    if (state) parts.push(`The player says it is "${state}".`);
+    return parts.join(' ');
+  }
+
   /** Wait until the song is audible, then locate it in the recording */
   private async findSong(playedAt: number): Promise<void> {
     this.setStage('finding');
     const sr = this.recorder.sampleRate;
     const window = 8;
+    let lastNote = 0;
     while (this.running) {
       await sleep(1000);
       this.emit({ type: 'level', data: this.recorder.level });
       const now = this.recorder.elapsed;
+      if (now - lastNote >= 5) {
+        lastNote = now;
+        this.emit({ type: 'info', data: `Waiting for the song… ${await this.diagnose()}` });
+      }
       if (now - playedAt > FIND_TIMEOUT_S) {
-        throw new Error("Couldn't hear the song. Check that speaker A is playing, loud enough, and the microphone is near it.");
+        throw new Error(`Couldn't hear the song. ${await this.diagnose()}`);
       }
       if (now < window + 2) continue;
       const startS = now - window;
       const mic = this.recorder.getSamples(startS, now);
       const found = findOffset(this.song, mic, Math.round(startS * sr), sr, Math.floor(now * sr));
-      if (found) {
+      if (found && this.confirm(found.offset, now)) {
         this.offset = found.offset;
         this.emit({ type: 'info', data: `Found the song (match ${found.quality.toFixed(0)}, it starts ${(found.offset / sr).toFixed(3)} s into the recording).` });
         return;
       }
+    }
+  }
+
+  /** A real match gives a sharp peak when the last few seconds are compared in detail; a chance one doesn't */
+  private confirm(offset: number, now: number): boolean {
+    const prev = this.offset;
+    this.offset = offset;
+    try {
+      const tracker = new RefTracker(this.recorder.sampleRate, 1e6);
+      const frameS = REF_FRAME / this.recorder.sampleRate;
+      for (let k = 1; k <= 3; k++) {
+        const f = this.frame(now - k * frameS);
+        tracker.push(f.mic, f.song);
+      }
+      const curve = tracker.curve(2);
+      const top = curve ? pickPeaks(curve, 1)[0] : undefined;
+      return !!top && top.strength >= MIN_PEAK_STRENGTH;
+    } finally {
+      this.offset = prev;
     }
   }
 
@@ -238,7 +287,7 @@ export class SongSession {
       if (settled && last) return { ms: last.ms, pattern: last.pattern };
       if (now - began > LEARN_MAX_S + MUTE_GUARD_S) {
         if (last && last.strength >= MIN_PEAK_STRENGTH) return { ms: last.ms, pattern: last.pattern };
-        throw new Error(`Couldn't find ${mine.name}'s sound in the song (is it muted or too quiet?).`);
+        throw new Error(`Couldn't find ${mine.name}'s sound in the song (is it muted or too quiet?). ${await this.diagnose()}`);
       }
     }
     return { ms: 0, pattern: [] };
