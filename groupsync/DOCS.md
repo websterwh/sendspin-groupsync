@@ -1,5 +1,7 @@
 # GroupSync
 
+(Home Assistant calls add-ons "apps" since 2026.2.)
+
 Measures how far your Music Assistant speakers are out of sync, using your phone's microphone, and tells you
 (or optionally sets) the delay to correct each one.
 
