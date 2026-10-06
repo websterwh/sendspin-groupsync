@@ -13,6 +13,7 @@ import {
   type LiveStage,
   type VolumeNote,
 } from '../calibration/LiveDriftSession';
+import { LiveLog } from '../calibration/liveLog';
 import { PlayerList } from './PlayerList';
 import { MuteWarning } from './MuteWarning';
 import type { MuteProblem } from '../calibration/muting';
@@ -72,6 +73,15 @@ function Run({
   const [sensitivity, setSensitivity] = useState(12);
   const [, tick] = useState(0);
   const sessionRef = useRef<LiveDriftSession | null>(null);
+  const logRef = useRef<LiveLog | null>(null);
+  if (!logRef.current) {
+    logRef.current = new LiveLog(
+      { a: a.name, b: b.name, userAgent: navigator.userAgent },
+      { speedS: 20, sensitivity: 12, keepVolumes: false }
+    );
+  }
+  const log = logRef.current;
+  const [copied, setCopied] = useState<string | null>(null);
 
   // Other members of the same sync group are muted for the whole test (they would add echoes)
   const others = useMemo(() => {
@@ -89,20 +99,27 @@ function Run({
     void session.run((event) => {
       if (event.type === 'stage') {
         setStage(event.data as LiveStage);
+        log.event('stage', { stage: event.data });
       } else if (event.type === 'reading') {
+        log.reading(event.data as LiveReading);
         setReadings((prev) => [...prev.slice(-1500), event.data as LiveReading]);
       } else if (event.type === 'mute_problems') {
         setMuteProblems(event.data as MuteProblem[]);
+        log.event('mute_problems', { problems: event.data });
       } else if (event.type === 'level') {
         setLevel(event.data as number);
       } else if (event.type === 'learn') {
         setLearn(event.data as LearnProgress);
+        log.event('learn', { progress: event.data });
       } else if (event.type === 'levels') {
         setLevels(event.data as LiveLevels);
+        log.event('levels', { levels: event.data });
       } else if (event.type === 'volume') {
         setVolumeNote(event.data as VolumeNote);
+        log.event('volume', { note: event.data });
       } else if (event.type === 'error') {
         setError(event.data as string);
+        log.event('error', { message: event.data });
       }
     });
     const timer = setInterval(() => tick((n) => n + 1), 1000);
@@ -288,9 +305,10 @@ function Run({
           <Choice
             label="Speed"
             value={speed}
-            options={[[8, 'Fast'], [20, 'Normal'], [40, 'Steady']]}
+            options={[[4, 'Instant'], [8, 'Fast'], [20, 'Normal'], [40, 'Steady']]}
             onChange={(v) => {
               setSpeed(v);
+              log.setting('speedS', v);
               sessionRef.current?.setMemory(v);
             }}
           />
@@ -300,6 +318,7 @@ function Run({
             options={[[12, 'Normal'], [8, 'High'], [6, 'Max']]}
             onChange={(v) => {
               setSensitivity(v);
+              log.setting('sensitivity', v);
               sessionRef.current?.setMinStrength(v);
             }}
           />
@@ -309,6 +328,7 @@ function Run({
               checked={keepVolumes}
               onChange={(e) => {
                 setKeepVolumes(e.target.checked);
+                log.setting('keepVolumes', e.target.checked);
                 sessionRef.current?.keepVolumes(e.target.checked);
               }}
             />
@@ -318,10 +338,23 @@ function Run({
         </div>
       )}
 
+      <div className="flex gap-3 text-xs">
+        <button onClick={() => log.download()} className="flex-1 py-2 px-3 bg-surface hover:bg-gray-700 rounded-lg">
+          Download log
+        </button>
+        <button
+          onClick={async () => setCopied((await log.copy()) ? 'Copied' : 'Copy failed')}
+          className="flex-1 py-2 px-3 bg-surface hover:bg-gray-700 rounded-lg"
+        >
+          {copied ?? 'Copy log'}
+        </button>
+      </div>
+
       <div className="flex gap-3">
         <button
           onClick={() => {
             sessionRef.current?.resetReadings();
+            log.event('clear');
             setReadings([]);
           }}
           disabled={stage !== 'live'}
@@ -332,6 +365,7 @@ function Run({
         <button
           onClick={() => {
             sessionRef.current?.learnAgain();
+            log.event('relearn');
             setReadings([]);
           }}
           disabled={stage !== 'live'}

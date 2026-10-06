@@ -168,7 +168,7 @@ export class LiveDriftSession {
     this.opts = {
       learnMaxS: options.learnMaxS ?? 45,
       memoryS: options.memoryS ?? 20,
-      readingEveryS: options.readingEveryS ?? 1,
+      readingEveryS: options.readingEveryS ?? 0.5,
       guardS: options.guardS ?? 2.5,
       minStrength: options.minStrength ?? 12,
       matchVolume: options.matchVolume ?? true,
@@ -363,7 +363,7 @@ export class LiveDriftSession {
     let processed = this.liveStart;
     let nextReading = 0;
     while (this.running && !this.relearn) {
-      await sleep(500);
+      await sleep(250);
       this.emit({ type: 'level', data: this.recorder.level });
       const now = onSample(this.recorder.elapsed);
       if (this.resetWindow) {
@@ -376,7 +376,7 @@ export class LiveDriftSession {
         nextReading = 0;
         continue;
       }
-      if (now - processed < 0.25) continue;
+      if (now - processed < 0.2) continue;
       await tracker.push(this.recorder.getSamples(processed, now));
       processed = now;
       if (now < nextReading) continue;
