@@ -59,6 +59,8 @@ const LEARN_MIN_FRAMES = 5;
 const LEARN_MAX_S = 25;
 const MUTE_GUARD_S = 3;
 const MIN_PEAK_STRENGTH = 12;
+/** A real match shows a peak far above this in the detailed comparison (simulated ones are 100+, noise stays below 20) */
+const CONFIRM_STRENGTH = 30;
 const LABEL_WINDOW_MS = 20;
 const RECENTRE_MS = 25;
 const FIND_TIMEOUT_S = 60;
@@ -221,7 +223,7 @@ export class SongSession {
       }
       const curve = tracker.curve(2);
       const top = curve ? pickPeaks(curve, 1)[0] : undefined;
-      return !!top && top.strength >= MIN_PEAK_STRENGTH;
+      return !!top && top.strength >= CONFIRM_STRENGTH;
     } finally {
       this.offset = prev;
     }

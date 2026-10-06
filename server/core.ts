@@ -305,13 +305,33 @@ export function createGroupSyncCore(options: CoreOptions) {
     let start = 0;
     let end = size - 1;
     if (range) {
-      start = range[1] ? Number(range[1]) : 0;
-      end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+      if (range[1]) {
+        start = Number(range[1]);
+        end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+      } else if (range[2]) {
+        // suffix range: the last N bytes (players read the tags at the end of mp3 files this way)
+        start = Math.max(0, size - Number(range[2]));
+      }
+      if (start >= size || start > end) {
+        res.statusCode = 416;
+        res.setHeader('Content-Range', `bytes */${size}`);
+        return res.end();
+      }
       res.statusCode = 206;
       res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
     }
     res.setHeader('Content-Length', end - start + 1);
     if (req.method === 'HEAD') return res.end();
+    if (fromPlayer) {
+      let sent = 0;
+      res.on('close', () =>
+        console.log(`[groupsync] song request ${start}-${end}: sent ${sent} of ${end - start + 1} bytes${res.writableFinished ? '' : ' (the player closed the connection early)'}`)
+      );
+      const stream = fs.createReadStream(file, { start, end });
+      stream.on('data', (c) => (sent += c.length));
+      stream.pipe(res);
+      return;
+    }
     fs.createReadStream(file, { start, end }).pipe(res);
   };
 

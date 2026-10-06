@@ -125,7 +125,7 @@ export function findOffset(
   // best.idx = song position where the mic stretch begins  =>  mic start corresponds to song sample best.idx*D
   const offset = micStart - (best.idx - m.length) * D;
   void sampleRate;
-  return quality > 8 ? { offset, quality } : null;
+  return quality > 20 ? { offset, quality } : null;
 }
 
 /**
