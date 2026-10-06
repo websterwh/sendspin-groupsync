@@ -46,3 +46,6 @@ vite.config.ts.timestamp-*
 tmp/
 temp/
 *.tmp
+
+# The Home Assistant add-on ships a prebuilt copy of the app
+!groupsync/app/dist/

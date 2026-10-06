@@ -6,6 +6,9 @@ import { groupSyncPlugin } from './vite-groupsync-plugin'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Relative asset URLs, so the built app works under any path (Home Assistant ingress serves it under
+  // /api/hassio_ingress/<token>/)
+  base: './',
   plugins: [react(), tailwindcss(), basicSsl(), groupSyncPlugin()],
   server: {
     host: true,   // Allow mobile access on local network

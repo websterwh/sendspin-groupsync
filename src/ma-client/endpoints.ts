@@ -2,6 +2,14 @@
  * Endpoint helpers shared by the MA and Sendspin websocket clients.
  */
 
+/**
+ * Directory the page is served from, ending in '/'. That is '/' normally, but inside Home Assistant the
+ * add-on lives under /api/hassio_ingress/<token>/, so every request has to be relative to it.
+ */
+export function basePath(): string {
+  return typeof window === 'undefined' ? '/' : new URL('.', window.location.href).pathname;
+}
+
 function parseServer(serverUrl: string): URL {
   let url = serverUrl.trim().replace(/\/$/, '');
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -25,7 +33,7 @@ export function buildMaWebSocketUrl(serverUrl: string, path: '/ws' | '/sendspin'
     return `wss://${parsed.host}${path}`;
   }
   if (pageSecure) {
-    return `wss://${window.location.host}/ma-proxy${path}?target=${encodeURIComponent(parsed.host)}`;
+    return `wss://${window.location.host}${basePath()}ma-proxy${path}?target=${encodeURIComponent(parsed.host)}`;
   }
   return `ws://${parsed.host}${path}`;
 }
@@ -44,7 +52,7 @@ interface DevServerInfo {
 export async function getDevServerInfo(serverUrl: string): Promise<DevServerInfo | null> {
   try {
     const host = serverUrl.trim() ? parseServer(serverUrl).host : '';
-    const res = await fetch(`/__groupsync/info?target=${encodeURIComponent(host)}`);
+    const res = await fetch(`${basePath()}__groupsync/info?target=${encodeURIComponent(host)}`);
     return res.ok ? ((await res.json()) as DevServerInfo) : null;
   } catch {
     return null; // not served by the GroupSync dev server
@@ -54,7 +62,7 @@ export async function getDevServerInfo(serverUrl: string): Promise<DevServerInfo
 /** Save (or with null, forget) the MA token in .env.local on the machine running the dev server */
 export async function saveTokenToEnv(token: string | null): Promise<boolean> {
   try {
-    const res = await fetch('/__groupsync/token', {
+    const res = await fetch(`${basePath()}__groupsync/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
@@ -79,13 +87,13 @@ export async function resolveClickTrackUrl(serverUrl: string, seconds?: number):
 
   const info = await getDevServerInfo(serverUrl);
   if (info?.clickTrackUrl) return `${info.clickTrackUrl}${query}`;
-  return `${window.location.origin}/calibration-clicks.wav`;
+  return `${window.location.origin}${basePath()}calibration-clicks.wav`;
 }
 
 /** Remember the MA address in .env.local (as MA_URL) so every device pre-fills it */
 export async function saveServerToEnv(server: string): Promise<void> {
   try {
-    await fetch('/__groupsync/server', {
+    await fetch(`${basePath()}__groupsync/server`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ server }),
@@ -118,7 +126,7 @@ export async function diagnoseConnection(serverUrl: string): Promise<DiagnosticS
   if (!info) return steps;
 
   try {
-    const res = await fetch(`/__groupsync/check?target=${encodeURIComponent(parsed.host)}`);
+    const res = await fetch(`${basePath()}__groupsync/check?target=${encodeURIComponent(parsed.host)}`);
     const body = (await res.json()) as { ok: boolean; error?: string };
     steps.push({
       label: `The computer running the dev server can reach Music Assistant at ${parsed.host}`,

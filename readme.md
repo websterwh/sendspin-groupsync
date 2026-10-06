@@ -1,5 +1,17 @@
 # GroupSync
 
+## Home Assistant add-on
+
+Run GroupSync inside Home Assistant and open it from the HA app's sidebar (no computer needed).
+
+1. Copy the `groupsync/` folder of this repo into Home Assistant's `/addons/` folder (the `addons` Samba share, or the SSH add-on).
+2. Settings → Add-ons → Add-on store → ⋮ → *Check for updates*. **GroupSync** appears under *Local add-ons*. Install it.
+3. In its Configuration tab set `ma_url` (e.g. `192.168.1.9:8095`) and `ma_token` (a long-lived token from Music Assistant). Start it and turn on *Show in sidebar*.
+4. Open Home Assistant over **HTTPS** (Nabu Casa, DuckDNS or your own certificate). Browsers, including the HA app, block the microphone on plain `http://`.
+
+The token stays on the server; the page never sees it. Music Assistant fetches the click track from the add-on on port 5174.
+After changing the code run `npm run build:addon`, copy `groupsync/` over again and rebuild the add-on.
+
 ## Quick start (how measurement works now)
 
 1. `npm install && npm run dev` on a desktop; open the printed **https** Network URL on your phone (accept the self-signed cert once - needed for the mic).
