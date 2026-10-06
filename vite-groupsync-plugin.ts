@@ -50,6 +50,8 @@ export function groupSyncPlugin(): Plugin {
     mediaPort: Number(process.env.GROUPSYNC_MEDIA_PORT ?? 5174),
     getSetting: (key) => readEnvValue(rootDir, key),
     setSetting: (key, value) => writeEnvValue(rootDir, key, value),
+    // Dev-only song test: drop audio files in ./groupsync-music (not used by the add-on build)
+    musicDir: process.env.NODE_ENV === 'production' ? undefined : path.join(process.cwd(), 'groupsync-music'),
   });
 
   const attach = (server: { config: { root: string }; middlewares: { use: (fn: never) => void }; httpServer: import('node:http').Server | null }) => {

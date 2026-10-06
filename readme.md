@@ -1,5 +1,9 @@
 # GroupSync
 
+## Song test (dev server only)
+
+`npm run dev` also has a **Song test**, which is the accurate way to measure two speakers while music plays. Put a long song in `groupsync-music/` (git-ignored; see the README there), pick two speakers and a song. GroupSync plays the song on the group itself, so it can compare the microphone with the exact audio: each speaker shows up as its own sharp peak, so the screen says which speaker is later and by how much (to a fraction of a millisecond), and follows it live (Speed sets how fast it reacts). It first plays each speaker alone for a few seconds, then both together. *Download log* / *Copy log* save every reading. Nothing is sent to the add-on build.
+
 ## Live drift test (dev server only)
 
 `npm run dev` has a second tool on the home screen: **Live drift test**. Pick two speakers, play your own music (Spotify Connect, anything), and it shows the gap between them while the music plays, with a chart of how it changes. It learns the room first (only speaker A plays, then only B, using mute; each stage ends as soon as the echo pattern is stable, usually 10-30 s) and matches the two speakers' volumes at the phone (restored when you stop unless you tick *Keep*), then updates about once a second. *Speed* sets how much recent audio counts (Fast reacts in a few seconds, Steady is smoother); *Clear* restarts the readings after you change a delay.

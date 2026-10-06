@@ -14,6 +14,8 @@
  *
  * 3. /__groupsync/info, /check, /token, /server helper endpoints.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import http from 'node:http';
 import os from 'node:os';
 import type { Duplex } from 'node:stream';
@@ -26,7 +28,18 @@ export interface CoreOptions {
   getSetting: (key: string) => string | null;
   /** Write a setting (null removes it). Omit when settings are managed elsewhere, e.g. add-on options. */
   setSetting?: (key: string, value: string | null) => void;
+  /** Folder of songs for the dev-only song test; omit to serve none (the add-on does) */
+  musicDir?: string;
 }
+
+const SONG_TYPES: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.flac': 'audio/flac',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+};
 
 const TRACK_NAME = 'calibration-clicks.wav';
 const MAX_TRACK_SECONDS = 600;
@@ -104,7 +117,7 @@ function parseTarget(raw: string | null): { host: string; port: string } | null 
 
 
 export function createGroupSyncCore(options: CoreOptions) {
-  const { mediaPort, getSetting, setSetting } = options;
+  const { mediaPort, getSetting, setSetting, musicDir } = options;
   const wss = new WebSocketServer({ noServer: true });
   let mediaServer: http.Server | null = null;
 
@@ -169,6 +182,13 @@ export function createGroupSyncCore(options: CoreOptions) {
     const url = new URL(req.url ?? '', 'http://localhost');
 
     if (url.pathname === `/${TRACK_NAME}`) return serveTrack(req, res, url);
+    if (url.pathname === '/__groupsync/songs') {
+      res.setHeader('Content-Type', 'application/json');
+      return res.end(JSON.stringify(listSongs()));
+    }
+    if (url.pathname.startsWith('/__groupsync/song/')) {
+      return serveSong(req, res, decodeURIComponent(url.pathname.slice('/__groupsync/song/'.length)));
+    }
 
     if (url.pathname === '/__groupsync/token' && req.method === 'POST') {
       if (!canWrite(req)) {
@@ -233,6 +253,7 @@ export function createGroupSyncCore(options: CoreOptions) {
     res.setHeader('Content-Type', 'application/json');
     res.end(
       JSON.stringify({
+        songUrlBase: mediaHost && musicDir ? `http://${mediaHost}:${mediaPort}/song/` : null,
         clickTrackUrl: mediaHost ? `http://${mediaHost}:${mediaPort}/${TRACK_NAME}` : null,
         tokenSaved: !!getSetting('MA_TOKEN'),
         defaultServer: getSetting('MA_URL'),
@@ -244,6 +265,39 @@ export function createGroupSyncCore(options: CoreOptions) {
         },
       })
     );
+  };
+
+  const listSongs = (): string[] => {
+    if (!musicDir) return [];
+    try {
+      return fs.readdirSync(musicDir).filter((f) => SONG_TYPES[path.extname(f).toLowerCase()]).sort();
+    } catch {
+      return [];
+    }
+  };
+
+  /** Serve one file from the music folder (only names that are in the listing), with byte ranges */
+  const serveSong = (req: http.IncomingMessage, res: http.ServerResponse, name: string) => {
+    if (!musicDir || !listSongs().includes(name)) {
+      res.statusCode = 404;
+      return res.end();
+    }
+    const file = path.join(musicDir, name);
+    const size = fs.statSync(file).size;
+    res.setHeader('Content-Type', SONG_TYPES[path.extname(name).toLowerCase()]);
+    res.setHeader('Accept-Ranges', 'bytes');
+    const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? '');
+    let start = 0;
+    let end = size - 1;
+    if (range) {
+      start = range[1] ? Number(range[1]) : 0;
+      end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+      res.statusCode = 206;
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+    }
+    res.setHeader('Content-Length', end - start + 1);
+    if (req.method === 'HEAD') return res.end();
+    fs.createReadStream(file, { start, end }).pipe(res);
   };
 
   const serveTrack = (req: http.IncomingMessage, res: http.ServerResponse, reqUrl: URL) => {
@@ -276,6 +330,7 @@ export function createGroupSyncCore(options: CoreOptions) {
     mediaServer = http.createServer((req, res) => {
       const reqUrl = new URL(req.url ?? '', 'http://localhost');
       if (reqUrl.pathname === `/${TRACK_NAME}`) return serveTrack(req, res, reqUrl);
+      if (reqUrl.pathname.startsWith('/song/')) return serveSong(req, res, decodeURIComponent(reqUrl.pathname.slice(6)));
       res.statusCode = 404;
       res.end();
     });

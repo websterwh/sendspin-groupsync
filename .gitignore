@@ -49,3 +49,5 @@ temp/
 
 # The Home Assistant add-on ships a prebuilt copy of the app
 !groupsync/app/dist/
+groupsync-music/*
+!groupsync-music/README.md

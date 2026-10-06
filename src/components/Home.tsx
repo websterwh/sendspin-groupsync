@@ -24,6 +24,13 @@ export function Home() {
       </button>
 
       {import.meta.env.DEV && (
+        <button className={card} onClick={() => setScreen('song')}>
+          <div className="font-medium">Song test</div>
+          <div className="text-sm text-text-muted">Play a long song from your music folder; shows which speaker is later and by how much.</div>
+        </button>
+      )}
+
+      {import.meta.env.DEV && (
         <button className={card} onClick={() => setScreen('live')}>
           <div className="font-medium">Live drift test</div>
           <div className="text-sm text-text-muted">Watch the gap between two speakers while your own music plays.</div>

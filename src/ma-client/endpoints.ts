@@ -43,6 +43,7 @@ export const ENV_TOKEN_PLACEHOLDER = '__GROUPSYNC_ENV_TOKEN__';
 
 interface DevServerInfo {
   clickTrackUrl?: string | null;
+  songUrlBase?: string | null;
   tokenSaved?: boolean;
   canSaveToken?: boolean;
   defaultServer?: string | null;
@@ -88,6 +89,30 @@ export async function resolveClickTrackUrl(serverUrl: string, seconds?: number):
   const info = await getDevServerInfo(serverUrl);
   if (info?.clickTrackUrl) return `${info.clickTrackUrl}${query}`;
   return `${window.location.origin}${basePath()}calibration-clicks.wav`;
+}
+
+/** Songs in the dev server's groupsync-music folder (song test) */
+export async function listSongs(): Promise<string[]> {
+  try {
+    const res = await fetch(`${basePath()}__groupsync/songs`);
+    return res.ok ? ((await res.json()) as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The file itself, fetched from the page's own server for decoding */
+export async function fetchSong(name: string): Promise<ArrayBuffer> {
+  const res = await fetch(`${basePath()}__groupsync/song/${encodeURIComponent(name)}`);
+  if (!res.ok) throw new Error(`Couldn't load ${name} (${res.status})`);
+  return res.arrayBuffer();
+}
+
+/** The plain-HTTP address Music Assistant plays the song from */
+export async function resolveSongUrl(serverUrl: string, name: string): Promise<string> {
+  const info = await getDevServerInfo(serverUrl);
+  if (!info?.songUrlBase) throw new Error("This server can't offer songs (is it the dev server?)");
+  return `${info.songUrlBase}${encodeURIComponent(name)}`;
 }
 
 /** Remember the MA address in .env.local (as MA_URL) so every device pre-fills it */
