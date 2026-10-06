@@ -17,6 +17,7 @@ import type { DetectedClick, RoomAnalysis } from './ClickAnalyzer';
 import type { CalibrationConfig, CalibrationResult } from '../types';
 import { DEFAULT_CALIBRATION_CONFIG } from '../types';
 import { maClient, resolveClickTrackUrl, getDevServerInfo } from '../ma-client';
+import { findDelaySetting, suggestValue } from '../sync-push/delaySettings';
 
 export interface CalibrationRoom {
   playerId: string;
@@ -29,7 +30,6 @@ export type CalibrationEventType =
   | 'started'
   | 'playback_started'
   | 'clicks_heard'
-  | 'level'
   | 'room_measuring'
   | 'room_measured'
   | 'mute_problems'
@@ -85,7 +85,6 @@ export class CalibrationSession {
   private config: CalibrationConfig;
   private eventCallback: CalibrationEventCallback | null = null;
   private liveTimer: ReturnType<typeof setInterval> | null = null;
-  private levelTimer: ReturnType<typeof setInterval> | null = null;
   private windowTimer: ReturnType<typeof setTimeout> | null = null;
   private measurements: Measurement[] = [];
   private playing = false;
@@ -96,6 +95,7 @@ export class CalibrationSession {
   private lastHeardCount = 0;
   private muteProblems = new Map<string, string>();
   private diag: PlaybackDiagnostics | null = null;
+  private latestClick: { at: number; snr: number } | null = null;
   private stopDiagnostics: (() => void) | null = null;
 
   private queueId: string;
@@ -153,7 +153,6 @@ export class CalibrationSession {
       this.emit({ type: 'playback_started', data: { url: clickTrackUrl } });
 
       this.startLiveDetection();
-      this.startLevelMeter();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Calibration failed';
       this.emit({ type: 'error', data: message });
@@ -227,18 +226,21 @@ export class CalibrationSession {
       const results: CalibrationResult[] = [];
       for (const room of analysis.rooms) {
         const info = this.rooms.find((r) => r.playerId === room.playerId);
-        const current = await maClient.getPlayerSyncAdjust(room.playerId);
         const isReference = room.playerId === this.rooms[0]?.playerId;
+        const setting = await findDelaySetting(room.playerId);
         // Everything is lined up to the reference room, which stays as it is. A room that arrives
-        // `arrivalMs` late needs that much less delay; one that arrives early needs that much more.
-        // (Measured with the current delay already applied, so this is a change from current.)
-        const change = room.arrivalMs === null || isReference ? 0 : -room.arrivalMs;
+        // `arrivalMs` late must play that much earlier; one that arrives early, later. This was
+        // measured with the current settings already applied, so the new value is current +/- that.
+        const earlierBy = room.arrivalMs === null || isReference ? 0 : room.arrivalMs;
+        const suggestion = setting ? suggestValue(setting, earlierBy) : null;
         results.push({
           playerId: room.playerId,
           playerName: info?.name ?? room.playerId,
-          offsetMs: Math.round((current ?? 0) + change),
+          offsetMs: suggestion?.value ?? 0,
           arrivalMs: room.arrivalMs ?? undefined,
-          currentSyncAdjustMs: current,
+          currentSyncAdjustMs: setting?.current ?? null,
+          setting,
+          clamped: suggestion?.clamped,
           spreadMs: room.spreadMs ?? undefined,
           isReference,
           confidence: this.confidence(room),
@@ -394,7 +396,7 @@ export class CalibrationSession {
     this.stopDiagnostics = stopDiag;
     this.liveTimer = setInterval(() => {
       const end = this.recorder.elapsed;
-      const from = Math.max(0, end - 6);
+      const from = Math.max(0, end - 4);
       const clicks = detectClicks(
         this.recorder.getSamples(from, end),
         this.recorder.sampleRate,
@@ -402,37 +404,26 @@ export class CalibrationSession {
         from
       );
       for (const c of clicks) this.heardTimes.add(Math.round(c.time));
+      // The newest click in view tells the user how strong the signal is right now
+      const newest = clicks[clicks.length - 1];
+      if (newest) this.latestClick = { at: newest.time, snr: newest.snr };
       const waitedS = (Date.now() - startedAt) / 1000;
       this.emit({
         type: 'clicks_heard',
         data: {
           total: this.heardTimes.size,
           newClicks: this.heardTimes.size - this.lastHeardCount,
-          level: this.recorder.level,
           timedOut: this.heardTimes.size === 0 && waitedS > HEAR_TIMEOUT_S,
           remainingSeconds: this.remainingSeconds,
           diagnostics: this.diag,
+          latest: this.latestClick ? { ageS: end - this.latestClick.at, snr: this.latestClick.snr } : null,
         },
       });
       this.lastHeardCount = this.heardTimes.size;
-    }, 1000);
-  }
-
-  /**
-   * Smooth microphone level for the meter. Clicks are short bursts, so the raw level jumps
-   * up and down; hold the peak and let it fall slowly instead.
-   */
-  private startLevelMeter(): void {
-    let smoothed = 0;
-    this.levelTimer = setInterval(() => {
-      smoothed = Math.max(this.recorder.level, smoothed * 0.92);
-      this.emit({ type: 'level', data: smoothed });
-    }, 100);
+    }, 500);
   }
 
   private stopTimers(): void {
-    if (this.levelTimer) clearInterval(this.levelTimer);
-    this.levelTimer = null;
     this.stopDiagnostics?.();
     this.stopDiagnostics = null;
     if (this.liveTimer) clearInterval(this.liveTimer);

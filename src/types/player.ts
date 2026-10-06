@@ -9,6 +9,7 @@ export interface Player {
   available: boolean;
   powered: boolean;
   playback_state?: string;
+  output_protocols?: Array<{ output_protocol_id: string; protocol_domain?: string; is_native?: boolean; available?: boolean }>;
   state?: string;
   volume_level: number;
   muted?: boolean;

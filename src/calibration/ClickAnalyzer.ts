@@ -111,7 +111,9 @@ export function detectClicks(
     // Noise floor: bursts occupy ~1% of the time for one frequency, so the median is noise
     const sorted = Float32Array.from(env).sort();
     const noise = sorted[Math.floor(sorted.length / 2)];
-    const threshold = Math.max(noise * 8, 0.002);
+    // Relative to the room's noise, with only a tiny absolute floor so quiet speakers (e.g. a Chromecast
+    // at modest volume) still register
+    const threshold = Math.max(noise * 6, 0.0004);
 
     let f = 0;
     while (f < frames) {

@@ -442,6 +442,25 @@ export class MAWebSocketClient {
   }
 
   /**
+   * Read a player's config values as plain numbers/strings (entries may be objects with a .value).
+   * Returns null if the config can't be read.
+   */
+  async getPlayerConfigValues(playerId: string): Promise<Record<string, unknown> | null> {
+    try {
+      const config = await this.sendCommand<{ values?: Record<string, unknown> }>('config/players/get', {
+        player_id: playerId,
+      });
+      const out: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(config?.values ?? {})) {
+        out[key] = entry && typeof entry === 'object' && 'value' in entry ? (entry as { value: unknown }).value : entry;
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Remove a (disconnected) player's configuration from Music Assistant
    */
   async removePlayerConfig(playerId: string): Promise<void> {

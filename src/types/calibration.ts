@@ -18,6 +18,21 @@ export interface ClickDetection {
   sampleOffset: number;   // Sample offset from expected
 }
 
+/** The MA setting that shifts a player's timing (see sync-push/delaySettings.ts) */
+export interface DelaySetting {
+  label: string;
+  /** Player whose config holds the setting (can be a protocol player under the device) */
+  configPlayerId: string;
+  key: string;
+  current: number;
+  min: number;
+  max: number;
+  /** True if raising the value makes the player play earlier */
+  higherIsEarlier: boolean;
+  /** Whether the direction above is documented (true) or assumed (false) */
+  directionVerified: boolean;
+}
+
 export interface CalibrationResult {
   playerId: string;
   playerName: string;
@@ -30,6 +45,10 @@ export interface CalibrationResult {
   /** Spread of the individual click measurements, ms */
   spreadMs?: number;
   isReference?: boolean;
+  /** The MA setting that shifts this player, if one was found (offsetMs is then its suggested new value) */
+  setting?: DelaySetting | null;
+  /** The range of the setting stopped the suggested value short of what is needed */
+  clamped?: boolean;
   /** Quality problems with this measurement (few clicks, unsteady, possibly two speakers audible, ...) */
   warnings?: string[];
   confidence: number;

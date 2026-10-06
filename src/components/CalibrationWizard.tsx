@@ -48,9 +48,9 @@ export function CalibrationWizard() {
   const [lastOutcome, setLastOutcome] = useState<{ id: string; clicks: number } | null>(null);
   const [measuringLeft, setMeasuringLeft] = useState(0);
   const [measuringName, setMeasuringName] = useState('');
-  const [live, setLive] = useState({ total: 0, level: 0, timedOut: false, remaining: 0 });
+  const [live, setLive] = useState({ total: 0, timedOut: false, remaining: 0 });
   const [playing, setPlaying] = useState(false);
-  const [levelPct, setLevelPct] = useState(0);
+  const [signal, setSignal] = useState<{ ageS: number; snr: number } | null>(null);
   const [waitedS, setWaitedS] = useState(0);
   const [diagnostics, setDiagnostics] = useState<PlaybackDiagnostics | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -98,7 +98,8 @@ export function CalibrationWizard() {
     setPlaying(false);
     setWaitedS(0);
     setDiagnostics(null);
-    setLive({ total: 0, level: 0, timedOut: false, remaining: 0 });
+    setLive({ total: 0, timedOut: false, remaining: 0 });
+    setSignal(null);
     setPhase('listening');
 
     const session = createCalibrationSession(
@@ -114,23 +115,18 @@ export function CalibrationWizard() {
           case 'playback_started':
             setPlaying(true);
             break;
-          case 'level': {
-            // Map dBFS (-60..-10) to the bar so quiet rooms still move it
-            const db = 20 * Math.log10(Math.max(event.data as number, 1e-5));
-            setLevelPct(Math.max(0, Math.min(100, ((db + 60) / 50) * 100)));
-            break;
-          }
           case 'clicks_heard': {
             const d = event.data as {
               total: number;
-              level: number;
               timedOut: boolean;
               remainingSeconds: number;
               diagnostics: PlaybackDiagnostics | null;
+              latest: { ageS: number; snr: number } | null;
             };
-            setLive({ total: d.total, level: d.level, timedOut: d.timedOut, remaining: d.remainingSeconds });
+            setLive({ total: d.total, timedOut: d.timedOut, remaining: d.remainingSeconds });
+            setSignal(d.latest);
             setDiagnostics(d.diagnostics);
-            setWaitedS((w) => (d.total === 0 ? w + 1 : 0));
+            setWaitedS((w) => (d.total === 0 ? w + 0.5 : 0));
             break;
           }
           case 'room_measured': {
@@ -222,13 +218,13 @@ export function CalibrationWizard() {
   const pushable = (all: Record<string, CalibrationResult>) =>
     Object.fromEntries(
       Object.entries(all).filter(
-        ([, r]) => !r.isReference && r.arrivalMs !== undefined && r.currentSyncAdjustMs !== null && r.currentSyncAdjustMs !== undefined
+        ([, r]) => !r.isReference && r.arrivalMs !== undefined && Math.abs(r.arrivalMs) > 2 && !!r.setting
       )
     );
 
   const handleApplyOffsets = async () => {
     if (Object.keys(pushable(results)).length === 0) {
-      setError('Nothing to push: either every speaker is already in sync, or Music Assistant did not report their current sync delay.');
+      setError('Nothing to push: either every speaker is already in sync, or no delay setting was found in Music Assistant for the ones that are out.');
       return;
     }
 
@@ -393,7 +389,7 @@ export function CalibrationWizard() {
 
           {live.total === 0 && playing && waitedS >= 8 && (
             <div className="p-3 bg-surface border border-gray-600 rounded-lg text-sm space-y-1">
-              <p className="font-medium">Still waiting ({waitedS} s). What&apos;s happening:</p>
+              <p className="font-medium">Still waiting ({Math.round(waitedS)} s). What&apos;s happening:</p>
               {diagnostics === null ? (
                 <p className="text-text-muted">Checking...</p>
               ) : (
@@ -451,12 +447,34 @@ export function CalibrationWizard() {
             </div>
           )}
 
-          <div>
-            <div className="text-xs text-text-muted mb-1">Microphone level (each click shows as a bump)</div>
-            <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
-              <div className="h-full bg-primary" style={{ width: `${levelPct}%`, transition: 'width 100ms linear' }} />
+          {/* Signal strength of the clicks being heard, not raw room noise: updates when a click lands */}
+          {live.total > 0 && (
+            <div>
+              {(() => {
+                const fresh = signal !== null && signal.ageS < 5;
+                const quality = !fresh ? 'none' : signal.snr >= 40 ? 'good' : signal.snr >= 15 ? 'ok' : 'weak';
+                const color = { none: 'bg-gray-500', good: 'bg-green-500', ok: 'bg-yellow-500', weak: 'bg-red-500' }[quality];
+                const width = fresh ? Math.max(8, Math.min(100, (Math.log10(Math.max(signal.snr, 1)) / 2.5) * 100)) : 0;
+                const text = {
+                  none: 'No click heard in the last few seconds',
+                  good: 'Good signal',
+                  ok: 'OK signal',
+                  weak: 'Weak signal: turn that speaker up or move the phone closer',
+                }[quality];
+                return (
+                  <>
+                    <div className="flex justify-between text-xs text-text-muted mb-1">
+                      <span>Click signal</span>
+                      <span>{text}</span>
+                    </div>
+                    <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
+                      <div className={`h-full ${color}`} style={{ width: `${width}%`, transition: 'width 300ms ease-out' }} />
+                    </div>
+                  </>
+                );
+              })()}
             </div>
-          </div>
+          )}
 
           <div className="space-y-2">
             {selectedPlayers.map((player, i) => {
@@ -624,37 +642,49 @@ export function CalibrationWizard() {
                       </>
                     )}
 
-                    {!result.isReference && arrival !== undefined && (
-                      <details className="text-sm">
-                        <summary className="cursor-pointer text-text-muted">Music Assistant sync delay</summary>
-                        <div className="mt-2 flex items-center gap-2">
-                          <span className="text-text-muted">
-                            Now {result.currentSyncAdjustMs ?? '?'} &rarr;
-                          </span>
-                          <input
-                            type="number"
-                            step="1"
-                            value={result.offsetMs}
-                            onChange={(e) => updateOffset(playerId, parseFloat(e.target.value) || 0)}
-                            className="w-24 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
-                          />
-                          <span className="text-text-muted">ms</span>
-                          <button
-                            onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
-                            className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
-                          >
-                            Copy
-                          </button>
-                        </div>
-                        <p className="text-xs text-text-muted mt-1">
-                          Assumes a bigger number delays the speaker; check that on one player first. If you
-                          compensate for this speaker somewhere else (another setting, or on the device), apply the
-                          change of {arrival > 0 ? '−' : '+'}{ms} ms there instead. MA&apos;s own limit is ±500 ms.
-                        </p>
-                        {Math.abs(result.offsetMs) > 500 && (
-                          <p className="text-xs text-yellow-300">Outside MA&apos;s ±500 ms range; it will be clamped if pushed.</p>
+                    {!result.isReference && arrival !== undefined && !inSync && (
+                      <div className="text-sm space-y-1">
+                        {result.setting ? (
+                          <>
+                            <div className="text-text-muted">{result.setting.label} in Music Assistant:</div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-text-muted">Now {result.setting.current} &rarr;</span>
+                              <input
+                                type="number"
+                                step="1"
+                                value={result.offsetMs}
+                                onChange={(e) => updateOffset(playerId, parseFloat(e.target.value) || 0)}
+                                className="w-24 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
+                              />
+                              <span className="text-text-muted">ms</span>
+                              <button
+                                onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
+                                className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                              >
+                                Copy
+                              </button>
+                            </div>
+                            <p className="text-xs text-text-muted">
+                              {result.setting.higherIsEarlier
+                                ? 'A higher value makes this speaker play earlier, a lower one later.'
+                                : 'Assumed: a higher value makes this speaker play later. Not verified for this setting, so check the direction on one speaker first.'}
+                              {result.setting.configPlayerId !== playerId &&
+                                ' (This setting lives on the device\'s Sendspin protocol player under Output protocols.)'}
+                            </p>
+                            {result.clamped && (
+                              <p className="text-xs text-yellow-300">
+                                That is as far as this setting goes ({result.setting.min} to {result.setting.max} ms), so
+                                it can&apos;t fully correct this speaker. Move the other speakers instead.
+                              </p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-xs text-text-muted">
+                            No delay setting was found for this speaker in Music Assistant. Apply the change
+                            ({arrival > 0 ? 'earlier' : 'later'} by {ms} ms) wherever you set its delay.
+                          </p>
                         )}
-                      </details>
+                      </div>
                     )}
 
                     <div className="text-xs text-text-muted">
@@ -683,7 +713,7 @@ export function CalibrationWizard() {
                 </div>
               )}
               <p className="text-xs text-text-muted">
-                Measured with whatever delays are set right now, so these are changes from the current setup.
+                Measured with whatever delays are set right now, so these are changes from your current setup, not new absolute values.
                 {driftPpm !== null && ` Clock drift corrected: ${driftPpm.toFixed(0)} ppm.`}
               </p>
             </div>

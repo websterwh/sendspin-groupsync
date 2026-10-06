@@ -1,11 +1,9 @@
 /**
- * SyncOffsetPusher - Sends calculated offsets to Sendspin players
+ * SyncOffsetPusher - Writes the suggested delay values back to Music Assistant.
  *
- * Supports multiple push strategies:
- * 1. Direct Sendspin protocol: Send client/sync_offset message
- * 2. Music Assistant config API: Use config/players/save endpoint
- *
- * The pusher tries the direct protocol first, then falls back to MA config API.
+ * Each result carries the setting that actually shifts that player (see delaySettings.ts), so the
+ * value goes to the right place: e.g. the Sendspin static delay on a Chromecast's Sendspin protocol
+ * player, or the generic sync_adjust. Results without a known setting are skipped.
  */
 
 import { maClient } from '../ma-client';
@@ -15,25 +13,20 @@ export interface PushResult {
   playerId: string;
   playerName: string;
   success: boolean;
-  method: 'protocol' | 'config' | 'none';
+  method: 'config' | 'none';
   appliedOffsetMs: number;
   error?: string;
 }
 
 export interface PushOptions {
-  /** Use Music Assistant config API as fallback if protocol fails */
-  useConfigApiFallback?: boolean;
   /** Timeout for each push operation in ms */
   timeoutMs?: number;
 }
 
-const DEFAULT_OPTIONS: PushOptions = {
-  useConfigApiFallback: true,
-  timeoutMs: 5000,
-};
+const DEFAULT_OPTIONS: PushOptions = { timeoutMs: 5000 };
 
 /**
- * Push sync offsets to multiple players
+ * Push suggested values to multiple players
  */
 export async function pushSyncOffsets(
   results: Record<string, CalibrationResult>,
@@ -43,22 +36,17 @@ export async function pushSyncOffsets(
   const pushResults: PushResult[] = [];
 
   for (const [playerId, result] of Object.entries(results)) {
-    const pushResult = await pushSingleOffset(playerId, result, opts);
-    pushResults.push(pushResult);
+    pushResults.push(await pushSingleOffset(playerId, result, opts));
   }
-
   return pushResults;
 }
 
-/**
- * Push sync offset to a single player
- */
 async function pushSingleOffset(
   playerId: string,
   result: CalibrationResult,
   options: PushOptions
 ): Promise<PushResult> {
-  const baseResult: PushResult = {
+  const base: PushResult = {
     playerId,
     playerName: result.playerName,
     success: false,
@@ -66,125 +54,22 @@ async function pushSingleOffset(
     appliedOffsetMs: result.offsetMs,
   };
 
-  // Check connection
-  if (!maClient.isConnected) {
-    return {
-      ...baseResult,
-      error: 'Not connected to Music Assistant',
-    };
-  }
+  if (!maClient.isConnected) return { ...base, error: 'Not connected to Music Assistant' };
+  const setting = result.setting;
+  if (!setting) return { ...base, error: 'No delay setting found for this player in Music Assistant' };
 
-  // Try direct Sendspin protocol first
+  const value = Math.max(setting.min, Math.min(setting.max, Math.round(result.offsetMs)));
   try {
-    const protocolResult = await pushViaProtocol(playerId, result.offsetMs, options.timeoutMs!);
-    if (protocolResult.success) {
-      return {
-        ...baseResult,
-        success: true,
-        method: 'protocol',
-      };
-    }
-  } catch (error) {
-    console.log('[SyncPush] Protocol push failed, trying config API:', error);
-  }
-
-  // Fall back to Music Assistant config API
-  if (options.useConfigApiFallback) {
-    try {
-      const configResult = await pushViaConfigApi(playerId, result.offsetMs, options.timeoutMs!);
-      if (configResult.success) {
-        return {
-          ...baseResult,
-          success: true,
-          method: 'config',
-        };
-      }
-      return {
-        ...baseResult,
-        error: configResult.error || 'Config API push failed',
-      };
-    } catch (error) {
-      return {
-        ...baseResult,
-        error: error instanceof Error ? error.message : 'Config API push failed',
-      };
-    }
-  }
-
-  return {
-    ...baseResult,
-    error: 'All push methods failed',
-  };
-}
-
-/**
- * Push offset via Sendspin protocol message
- * This sends the client/sync_offset message directly to the player
- */
-async function pushViaProtocol(
-  playerId: string,
-  offsetMs: number,
-  timeoutMs: number
-): Promise<{ success: boolean; error?: string }> {
-  // Message format (for reference):
-  // { type: 'client/sync_offset', payload: { player_id, offset_ms, source, timestamp } }
-
-  try {
-    // Send via Music Assistant's player command mechanism
-    // This routes the message to the specific player
-    await maClient.sendCommand(
-      'players/cmd/sync_offset',
-      {
-        player_id: playerId,
-        offset_ms: offsetMs,
-        source: 'groupsync',
-      },
-      timeoutMs
-    );
-
-    console.log(`[SyncPush] Protocol push succeeded for ${playerId}: ${offsetMs}ms`);
-    return { success: true };
-  } catch (error) {
-    // Protocol push not supported yet - this is expected until players implement the handler
-    console.log(`[SyncPush] Protocol push not supported for ${playerId}:`, error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Protocol push failed',
-    };
-  }
-}
-
-/**
- * Push offset via Music Assistant config API
- * This saves the offset to player configuration
- */
-async function pushViaConfigApi(
-  playerId: string,
-  offsetMs: number,
-  timeoutMs: number
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    // Music Assistant config/players/save endpoint
     await maClient.sendCommand(
       'config/players/save',
-      {
-        player_id: playerId,
-        // MA's per-player sync delay (CONF_SYNC_ADJUST): integer ms, range -500..500
-        values: {
-          sync_adjust: Math.max(-500, Math.min(500, Math.round(offsetMs))),
-        },
-      },
-      timeoutMs
+      { player_id: setting.configPlayerId, values: { [setting.key]: value } },
+      options.timeoutMs
     );
-
-    console.log(`[SyncPush] Config API push succeeded for ${playerId}: ${offsetMs}ms`);
-    return { success: true };
+    console.log(`[SyncPush] Set ${setting.key}=${value} on ${setting.configPlayerId} (${result.playerName})`);
+    return { ...base, success: true, method: 'config', appliedOffsetMs: value };
   } catch (error) {
-    console.error(`[SyncPush] Config API push failed for ${playerId}:`, error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Config save failed',
-    };
+    console.error(`[SyncPush] Failed for ${result.playerName}:`, error);
+    return { ...base, error: error instanceof Error ? error.message : 'Config save failed' };
   }
 }
 
@@ -194,9 +79,8 @@ async function pushViaConfigApi(
 export function createSyncOffsetPusher() {
   return {
     pushOffsets: pushSyncOffsets,
-    pushSingleOffset: async (playerId: string, result: CalibrationResult) => {
-      return pushSingleOffset(playerId, result, DEFAULT_OPTIONS);
-    },
+    pushSingleOffset: async (playerId: string, result: CalibrationResult) =>
+      pushSingleOffset(playerId, result, DEFAULT_OPTIONS),
   };
 }
 
