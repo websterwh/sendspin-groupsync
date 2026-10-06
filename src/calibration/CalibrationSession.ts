@@ -100,6 +100,8 @@ export class CalibrationSession {
 
   private queueId: string;
   private rooms: CalibrationRoom[];
+  /** Group members that aren't measured but play along; muted during every measurement */
+  private others: CalibrationRoom[];
   private serverUrl: string;
 
   /**
@@ -110,10 +112,12 @@ export class CalibrationSession {
     queueId: string,
     rooms: CalibrationRoom[],
     serverUrl: string,
-    config?: Partial<CalibrationConfig>
+    config?: Partial<CalibrationConfig>,
+    others: CalibrationRoom[] = []
   ) {
     this.queueId = queueId;
     this.rooms = rooms;
+    this.others = others;
     this.serverUrl = serverUrl;
     this.config = { ...DEFAULT_CALIBRATION_CONFIG, ...config };
   }
@@ -307,8 +311,9 @@ export class CalibrationSession {
   /** Mute everyone except `playerId` (which is unmuted so it can be heard), then verify it took effect. */
   private async applyMutes(playerId: string): Promise<void> {
     const failed = new Map<string, string>();
+    const everyone = [...this.rooms, ...this.others];
     await Promise.all(
-      this.rooms.map(async (room) => {
+      everyone.map(async (room) => {
         const shouldMute = room.playerId !== playerId;
         try {
           await maClient.playerCommand(room.playerId, 'volume_mute', { muted: shouldMute });
@@ -324,7 +329,7 @@ export class CalibrationSession {
     // Commands can be accepted without effect (e.g. grouped players); read the state back
     await new Promise((resolve) => setTimeout(resolve, 600));
     await Promise.all(
-      this.rooms
+      everyone
         .filter((room) => room.playerId !== playerId && !failed.has(room.name))
         .map(async (room) => {
           try {
@@ -357,7 +362,7 @@ export class CalibrationSession {
     if (!this.mutesChanged) return;
     this.mutesChanged = false;
     await Promise.all(
-      this.rooms.map(async (room) => {
+      [...this.rooms, ...this.others].map(async (room) => {
         try {
           await maClient.playerCommand(room.playerId, 'volume_mute', { muted: room.muted ?? false });
         } catch (error) {
@@ -460,7 +465,8 @@ export function createCalibrationSession(
   queueId: string,
   rooms: CalibrationRoom[],
   serverUrl: string,
-  config?: Partial<CalibrationConfig>
+  config?: Partial<CalibrationConfig>,
+  others: CalibrationRoom[] = []
 ): CalibrationSession {
-  return new CalibrationSession(queueId, rooms, serverUrl, config);
+  return new CalibrationSession(queueId, rooms, serverUrl, config, others);
 }

@@ -82,3 +82,31 @@ function pickTarget(
 
   return selectedIds.find((id) => ids.has(id)) ?? members[0]?.player_id ?? root;
 }
+
+/**
+ * Players that play along with the track because they are in the same sync group as `targetId`,
+ * but aren't among the rooms being measured. They have to be muted while a room is measured.
+ */
+export function otherGroupMembers(allPlayers: Player[], targetId: string, selectedIds: string[]): Player[] {
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    if (!parent.has(x)) parent.set(x, x);
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    parent.set(x, root);
+    return root;
+  };
+  for (const p of allPlayers) {
+    find(p.player_id);
+    for (const other of related(p)) parent.set(find(p.player_id), find(other));
+  }
+  const root = find(targetId);
+  return allPlayers.filter(
+    (p) =>
+      find(p.player_id) === root &&
+      !selectedIds.includes(p.player_id) &&
+      p.player_id !== targetId &&
+      p.type !== 'group' &&
+      p.type !== 'protocol'
+  );
+}

@@ -2,10 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCalibrationStore, usePlayersStore, useConnectionStore } from '../store';
 import { createCalibrationSession, CalibrationSession } from '../calibration';
 import type { RoomReading, MeasurementKind, PlaybackDiagnostics } from '../calibration/CalibrationSession';
-import { analyzeGroups } from '../calibration/grouping';
+import { analyzeGroups, otherGroupMembers } from '../calibration/grouping';
 import { pushSyncOffsets } from '../sync-push';
 import type { PushResult } from '../sync-push';
 import type { CalibrationResult } from '../types';
+
+/**
+ * Differences below this are inside what a phone-microphone measurement can tell apart: moving the
+ * phone 1 m shifts one speaker's arrival by ~3 ms, and devices re-sync with some jitter. It is also
+ * far below what is audible (~10-20 ms between speakers).
+ */
+const IN_SYNC_MS = 8;
 
 export function CalibrationWizard() {
   const { phase, setPhase, results, setResult, clearResults, updateOffset, setError, error } =
@@ -37,6 +44,11 @@ export function CalibrationWizard() {
     autoOrdered.current = key;
     if (selectedPlayerIds.includes(playTarget) && selectedPlayerIds[0] !== playTarget) makeReference(playTarget);
   }, [phase, playTarget, selectedPlayerIds, makeReference]);
+  // Group members that play along but aren't being measured: they're muted during each measurement
+  const unselectedMembers = useMemo(
+    () => otherGroupMembers(players, playTarget, selectedPlayerIds),
+    [players, playTarget, selectedPlayerIds]
+  );
   const nameOf = (id: string) => players.find((p) => p.player_id === id)?.name ?? id;
 
   // Room order: selected order, then the first room again at the end to measure clock drift
@@ -105,7 +117,9 @@ export function CalibrationWizard() {
     const session = createCalibrationSession(
       playTarget,
       selectedPlayers.map((p) => ({ playerId: p.player_id, name: p.name, muted: p.volume_muted ?? p.muted })),
-      serverUrl
+      serverUrl,
+      undefined,
+      unselectedMembers.map((p) => ({ playerId: p.player_id, name: p.name, muted: p.volume_muted ?? p.muted }))
     );
     sessionRef.current = session;
 
@@ -218,7 +232,7 @@ export function CalibrationWizard() {
   const pushable = (all: Record<string, CalibrationResult>) =>
     Object.fromEntries(
       Object.entries(all).filter(
-        ([, r]) => !r.isReference && r.arrivalMs !== undefined && Math.abs(r.arrivalMs) > 2 && !!r.setting
+        ([, r]) => !r.isReference && r.arrivalMs !== undefined && Math.abs(r.arrivalMs) > IN_SYNC_MS && !!r.setting
       )
     );
 
@@ -265,7 +279,7 @@ export function CalibrationWizard() {
           <div className="p-4 bg-blue-900/20 border border-blue-700/50 rounded-lg text-blue-300 text-sm">
             <ul className="list-disc list-inside text-blue-300/70 space-y-1">
               <li>The players must be in one sync group in Music Assistant (so they play the same stream)</li>
-              <li>Hold the phone at the same distance (about 1 m) from each speaker</li>
+              <li>Hold the phone at the same distance (about 1 m) from each speaker. 1 m closer makes a speaker arrive about 3 ms earlier, so in a shared room keep the phone centred between them</li>
               <li>About 12 seconds per room, plus a return to the first room at the end to correct clock drift</li>
               <li>Keep the rooms quiet; keep the phone still while measuring. The other players are muted automatically while each room is measured (and restored after), so speakers sharing a room are fine.</li>
             </ul>
@@ -338,6 +352,13 @@ export function CalibrationWizard() {
                   </div>
                 ))}
               </div>
+              {unselectedMembers.length > 0 && (
+                <div className="text-xs text-yellow-300 mt-2">
+                  Also in this group, so it plays along: {unselectedMembers.map((p) => p.name).join(', ')}. It is
+                  muted automatically while each room is measured and restored after, but isn&apos;t measured. To
+                  measure it too, select it.
+                </div>
+              )}
               <div className="text-xs text-text-muted mt-2">
                 The reference is measured first and last, and is the baseline the others are compared to.
                 While one room is measured, the other players are muted automatically and restored after.
@@ -612,7 +633,7 @@ export function CalibrationWizard() {
               {Object.entries(results).map(([playerId, result]) => {
                 const arrival = result.arrivalMs;
                 const ms = arrival === undefined ? 0 : Math.round(Math.abs(arrival));
-                const inSync = arrival !== undefined && ms <= 2;
+                const inSync = arrival !== undefined && ms <= IN_SYNC_MS;
                 return (
                   <div key={playerId} className="p-4 bg-surface rounded-lg space-y-2">
                     <div className="flex justify-between items-baseline">
@@ -629,7 +650,16 @@ export function CalibrationWizard() {
                     ) : arrival === undefined ? (
                       <p className="text-red-300">No clicks heard. Measure this room again.</p>
                     ) : inSync ? (
-                      <p className="text-lg font-semibold text-green-300">In sync with {referenceResult?.playerName}</p>
+                      <>
+                        <p className="text-lg font-semibold text-green-300">
+                          In sync with {referenceResult?.playerName}
+                        </p>
+                        <p className="text-xs text-text-muted">
+                          Measured {ms} ms {arrival > 0 ? 'late' : 'early'}, which is within what this method can
+                          reliably measure (about ±5 ms) and too small to hear. Leave it as it is; chasing it can make
+                          the next test read the other way.
+                        </p>
+                      </>
                     ) : (
                       <>
                         <p className={`text-2xl font-bold ${arrival > 0 ? 'text-orange-300' : 'text-blue-300'}`}>
