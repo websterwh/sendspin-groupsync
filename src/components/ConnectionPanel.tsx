@@ -7,8 +7,6 @@ export function ConnectionPanel() {
   const {
     serverUrl,
     setServerUrl,
-    sendspinUrl,
-    setSendspinUrl,
     connecting,
     setConnecting,
     setConnected,
@@ -19,8 +17,6 @@ export function ConnectionPanel() {
   } = useConnectionStore();
   const { setPlayers, setLoading } = usePlayersStore();
   const [inputUrl, setInputUrl] = useState(serverUrl || '');
-  const [inputSendspinUrl, setInputSendspinUrl] = useState(sendspinUrl || '');
-  const [showAdvanced, setShowAdvanced] = useState(!!sendspinUrl);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -82,7 +78,6 @@ export function ConnectionPanel() {
 
       // Save URLs
       setServerUrl(inputUrl.trim());
-      setSendspinUrl(inputSendspinUrl.trim());
       addRecentServer(inputUrl.trim());
       void saveServerToEnv(inputUrl.trim());
 
@@ -185,12 +180,7 @@ export function ConnectionPanel() {
   if (needsAuth) {
     return (
       <div className="space-y-6">
-        <div className="text-center">
-          <h2 className="text-2xl font-bold mb-2">Login to Music Assistant</h2>
-          <p className="text-text-muted">
-            Authentication is required. Enter your credentials.
-          </p>
-        </div>
+        <h2 className="text-2xl font-bold text-center">Log in</h2>
 
         <div className="space-y-4">
           <div>
@@ -231,13 +221,11 @@ export function ConnectionPanel() {
             />
           </div>
 
-          <div className="relative text-center text-xs text-text-muted">
-            <span>or use an access token</span>
-          </div>
+          <div className="text-center text-xs text-text-muted">or</div>
 
           <div>
             <label htmlFor="token" className="block text-sm font-medium mb-2">
-              Long-lived access token
+              Access token
             </label>
             <input
               id="token"
@@ -255,7 +243,7 @@ export function ConnectionPanel() {
                          placeholder-gray-500 disabled:opacity-50"
             />
             <p className="mt-1 text-xs text-text-muted">
-              In Music Assistant: profile &rarr; Long-lived access tokens. Stored only in this browser.
+              In Music Assistant: profile &rarr; Access tokens. Stored only in this browser.
             </p>
             {canSaveToEnv && (
               <label className="mt-2 flex items-start gap-2 text-xs text-text-muted">
@@ -265,10 +253,7 @@ export function ConnectionPanel() {
                   onChange={(e) => setSaveToEnv(e.target.checked)}
                   className="mt-0.5"
                 />
-                <span>
-                  Save token in <code>.env.local</code> on this computer, so other devices (your phone) connect
-                  without typing it. It stays on the dev server and is never sent to the browser.
-                </span>
+                <span>Save on this computer (.env.local) so other devices don&apos;t need it</span>
               </label>
             )}
             <button
@@ -322,12 +307,7 @@ export function ConnectionPanel() {
 
   return (
     <div className="space-y-6">
-      <div className="text-center">
-        <h2 className="text-2xl font-bold mb-2">Connect to Music Assistant</h2>
-        <p className="text-text-muted">
-          Enter your Music Assistant server URL to discover Sendspin players.
-        </p>
-      </div>
+      <h2 className="text-2xl font-bold text-center">Connect</h2>
 
       <div className="space-y-4">
         <div>
@@ -348,48 +328,6 @@ export function ConnectionPanel() {
           />
         </div>
 
-        {/* Advanced settings toggle */}
-        <button
-          type="button"
-          onClick={() => setShowAdvanced(!showAdvanced)}
-          className="flex items-center gap-2 text-sm text-text-muted hover:text-white transition-colors"
-        >
-          <svg
-            className={`w-4 h-4 transition-transform ${showAdvanced ? 'rotate-90' : ''}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-          Advanced Settings
-        </button>
-
-        {/* Sendspin URL (advanced) */}
-        {showAdvanced && (
-          <div>
-            <label htmlFor="sendspin-url" className="block text-sm font-medium mb-2">
-              Sendspin Server URL <span className="text-text-muted">(optional)</span>
-            </label>
-            <input
-              id="sendspin-url"
-              type="text"
-              value={inputSendspinUrl}
-              onChange={(e) => setInputSendspinUrl(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="192.168.1.100:8095 (for clock sync)"
-              disabled={connecting}
-              className="w-full px-4 py-3 bg-surface border border-gray-600 rounded-lg
-                         focus:ring-2 focus:ring-primary focus:border-transparent
-                         placeholder-gray-500 disabled:opacity-50"
-            />
-            <p className="mt-1 text-xs text-text-muted">
-              Only needed if Sendspin runs on a different server than Music Assistant.
-              Used for precise clock synchronization during calibration.
-            </p>
-          </div>
-        )}
-
         {error && (
           <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-red-300 text-sm">
             {error}
@@ -398,8 +336,7 @@ export function ConnectionPanel() {
 
         {(diagnosing || diagnostics) && (
           <div className="p-3 bg-surface border border-gray-600 rounded-lg text-sm space-y-2">
-            <p className="font-medium">Connection check</p>
-            {diagnosing && <p className="text-text-muted">Checking...</p>}
+                        {diagnosing && <p className="text-text-muted">Checking...</p>}
             {diagnostics?.map((step) => (
               <div key={step.label}>
                 <span>{step.ok ? '✅' : '❌'} {step.label}</span>
@@ -445,11 +382,6 @@ export function ConnectionPanel() {
         </div>
       )}
 
-      <div className="text-center text-xs text-text-muted">
-        <p>
-          Make sure Music Assistant is running and accessible on your network.
-        </p>
-      </div>
     </div>
   );
 }

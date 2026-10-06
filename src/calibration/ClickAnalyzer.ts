@@ -69,6 +69,97 @@ export interface AnalysisResult {
 const ENVELOPE_WINDOW_S = 0.004; // 4 ms = whole periods of 500/1000/2000/3000 Hz at 48 kHz
 const ENVELOPE_HOP_S = 0.001;
 
+/** Length of each click burst in the track (Hann-windowed sine) */
+export const CLICK_MS = 50;
+
+export interface DetectOptions {
+  /** Refine each click's time by matching the whole burst waveform (default true) */
+  refine?: boolean;
+  clickMs?: number;
+}
+
+const templateCache = new Map<string, { hc: Float64Array; hs: Float64Array }>();
+
+function burstTemplate(freq: number, sampleRate: number, n: number) {
+  const key = `${freq}|${sampleRate}|${n}`;
+  let t = templateCache.get(key);
+  if (!t) {
+    const hc = new Float64Array(n);
+    const hs = new Float64Array(n);
+    const w = (2 * Math.PI * freq) / sampleRate;
+    for (let m = 0; m < n; m++) {
+      const hann = 0.5 * (1 - Math.cos((2 * Math.PI * m) / n));
+      hc[m] = hann * Math.cos(w * m);
+      hs[m] = hann * Math.sin(w * m);
+    }
+    t = { hc, hs };
+    templateCache.set(key, t);
+  }
+  return t;
+}
+
+/**
+ * Matched-filter estimate of where a burst starts: slide the known burst (Hann-windowed sine) across the
+ * recording and take the lag where it fits best. This uses the energy of the whole 50 ms burst rather than
+ * one threshold crossing on its edge, so noise and reverb move it much less. Returns the (fractional)
+ * start sample, or null if the best fit sits at the edge of the search range.
+ */
+function matchedBurstStart(
+  samples: Float32Array,
+  sampleRate: number,
+  freq: number,
+  burstSamples: number,
+  approxStart: number
+): number | null {
+  const { hc, hs } = burstTemplate(freq, sampleRate, burstSamples);
+  const score = (s: number): number => {
+    if (s < 0 || s + burstSamples > samples.length) return -1;
+    let i = 0;
+    let q = 0;
+    for (let m = 0; m < burstSamples; m++) {
+      const x = samples[s + m];
+      i += x * hc[m];
+      q += x * hs[m];
+    }
+    return i * i + q * q;
+  };
+
+  const range = Math.round(0.02 * sampleRate);
+  const coarseStep = Math.max(1, Math.round(0.001 * sampleRate));
+  const centre = Math.round(approxStart);
+  let bestS = -1;
+  let best = -1;
+  for (let s = centre - range; s <= centre + range; s += coarseStep) {
+    const v = score(s);
+    if (v > best) {
+      best = v;
+      bestS = s;
+    }
+  }
+  if (bestS < 0 || Math.abs(bestS - centre) >= range - coarseStep) return null;
+
+  const fineStep = Math.max(1, Math.round(sampleRate / 12000));
+  let fineBest = -1;
+  let fineS = bestS;
+  for (let s = bestS - coarseStep; s <= bestS + coarseStep; s += fineStep) {
+    const v = score(s);
+    if (v > fineBest) {
+      fineBest = v;
+      fineS = s;
+    }
+  }
+  // Parabolic interpolation through the peak and its neighbours
+  const y0 = score(fineS - fineStep);
+  const y1 = fineBest;
+  const y2 = score(fineS + fineStep);
+  const denom = y0 - 2 * y1 + y2;
+  if (y0 > 0 && y2 > 0 && denom < 0) {
+    const offset = (0.5 * (y0 - y2)) / denom;
+    if (Math.abs(offset) <= 1) return fineS + offset * fineStep;
+  }
+  return fineS;
+}
+
 /**
  * Detect click bursts of the given frequencies in a recording.
  * `samples[0]` is at time `startTime` seconds.
@@ -77,8 +168,11 @@ export function detectClicks(
   samples: Float32Array,
   sampleRate: number,
   frequencies: number[],
-  startTime = 0
+  startTime = 0,
+  options: DetectOptions = {}
 ): DetectedClick[] {
+  const refine = options.refine ?? true;
+  const burstSamples = Math.round(((options.clickMs ?? CLICK_MS) / 1000) * sampleRate);
   const clicks: DetectedClick[] = [];
   const W = Math.max(8, Math.round(ENVELOPE_WINDOW_S * sampleRate));
   const H = Math.max(1, Math.round(ENVELOPE_HOP_S * sampleRate));
@@ -150,7 +244,12 @@ export function detectClicks(
         if (j > 0 && j < frames && env[j - 1] > half && env[j] <= half) {
           fallFrame = j - 1 + (env[j - 1] - half) / (env[j - 1] - env[j]);
         }
-        const centerSample = riseFrame * H + W / 2;
+        let centerSample = riseFrame * H + W / 2;
+        if (refine) {
+          // The 50% rise of a Hann burst sits a quarter of the way in; search around where it should start
+          const start = matchedBurstStart(samples, sampleRate, freq, burstSamples, centerSample - burstSamples / 4);
+          if (start !== null) centerSample = start + burstSamples / 4;
+        }
         clicks.push({
           time: startTime + centerSample / sampleRate,
           freqIndex,
@@ -373,14 +472,10 @@ export const MAX_NORMAL_WIDTH_MS = 33;
 /** Human-readable problems with a measurement */
 export function qualityWarnings(room: RoomAnalysis): string[] {
   const warnings: string[] = [];
-  if (room.clicks === 0) return ['No usable clicks heard'];
-  if (room.clicks < 6) warnings.push(`Only ${room.clicks} usable clicks (aim for 8+)`);
-  if (room.spreadMs !== null && room.spreadMs > 3) {
-    warnings.push(`Unsteady (±${room.spreadMs.toFixed(1)} ms between clicks)`);
-  }
-  if (room.widthMs !== null && room.widthMs > MAX_NORMAL_WIDTH_MS) {
-    warnings.push('Clicks look smeared: more than one speaker may be audible here. Move closer to this speaker.');
-  }
-  if (room.snr !== null && room.snr < 15) warnings.push('Weak signal: move closer or raise the volume');
+  if (room.clicks === 0) return ['No clicks heard'];
+  if (room.clicks < 5) warnings.push(`Only ${room.clicks} clicks`);
+  if (room.spreadMs !== null && room.spreadMs > 3) warnings.push(`Unsteady (±${room.spreadMs.toFixed(1)} ms)`);
+  if (room.widthMs !== null && room.widthMs > MAX_NORMAL_WIDTH_MS) warnings.push('Two speakers audible? Move closer');
+  if (room.snr !== null && room.snr < 15) warnings.push('Weak signal');
   return warnings;
 }

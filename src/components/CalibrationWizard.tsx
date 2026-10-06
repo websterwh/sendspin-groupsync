@@ -58,8 +58,7 @@ export function CalibrationWizard() {
   // Which measurement is in progress ('closing' = the reference room's drift check), and the last outcome
   const [measuringId, setMeasuringId] = useState<string | null>(null);
   const [lastOutcome, setLastOutcome] = useState<{ id: string; clicks: number } | null>(null);
-  const [measuringLeft, setMeasuringLeft] = useState(0);
-  const [measuringName, setMeasuringName] = useState('');
+  const [progressClicks, setProgressClicks] = useState(0);
   const [live, setLive] = useState({ total: 0, timedOut: false, remaining: 0 });
   const [playing, setPlaying] = useState(false);
   const [signal, setSignal] = useState<{ ageS: number; snr: number } | null>(null);
@@ -83,13 +82,9 @@ export function CalibrationWizard() {
   const [isPushing, setIsPushing] = useState(false);
   const [pushResults, setPushResults] = useState<PushResult[] | null>(null);
   const sessionRef = useRef<CalibrationSession | null>(null);
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    return () => {
-      sessionRef.current?.stop();
-      if (countdownRef.current) clearInterval(countdownRef.current);
-    };
+    return () => sessionRef.current?.stop();
   }, []);
 
   const firstRoom = selectedPlayers[0];
@@ -109,6 +104,7 @@ export function CalibrationWizard() {
     setClosingDone(false);
     setPlaying(false);
     setWaitedS(0);
+    setProgressClicks(0);
     setDiagnostics(null);
     setLive({ total: 0, timedOut: false, remaining: 0 });
     setSignal(null);
@@ -155,9 +151,11 @@ export function CalibrationWizard() {
             if (d.kind === 'closing' && d.clicks > 0) setClosingDone(true);
             setLastOutcome({ id: d.kind === 'closing' ? 'closing' : d.playerId, clicks: d.clicks });
             setMeasuringId(null);
-            setMeasuringLeft(0);
             break;
           }
+          case 'room_progress':
+            setProgressClicks((event.data as { clicks: number }).clicks);
+            break;
           case 'mute_problems':
             setMuteProblems(event.data as { name: string; reason: string }[]);
             break;
@@ -194,22 +192,15 @@ export function CalibrationWizard() {
     }
   };
 
-  // Measure (or re-measure) a room; the reference room's closing check uses kind 'closing'
+  // Measure (or re-measure) a room; the reference room's drift check uses kind 'closing'.
+  // The session ends the measurement by itself once the clicks agree.
   const startMeasurement = (playerId: string, kind: MeasurementKind) => {
     const session = sessionRef.current;
     if (!session || measuring) return;
-    setMeasuringName(nameOf(playerId));
     setMeasuringId(kind === 'closing' ? 'closing' : playerId);
+    setProgressClicks(0);
     setLastOutcome(null);
-    setMeasuringLeft(session.windowSeconds + 3);
     void session.measureRoom(playerId, kind);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-    countdownRef.current = setInterval(() => {
-      setMeasuringLeft((n) => {
-        if (n <= 1 && countdownRef.current) clearInterval(countdownRef.current);
-        return Math.max(0, n - 1);
-      });
-    }, 1000);
   };
 
   const handleCancelCalibration = () => {
@@ -238,7 +229,7 @@ export function CalibrationWizard() {
 
   const handleApplyOffsets = async () => {
     if (Object.keys(pushable(results)).length === 0) {
-      setError('Nothing to push: either every speaker is already in sync, or no delay setting was found in Music Assistant for the ones that are out.');
+      setError('Nothing to push: everything is in sync, or no delay setting was found for the speakers that are out.');
       return;
     }
 
@@ -256,54 +247,42 @@ export function CalibrationWizard() {
     }
   };
 
-  return (
-    <div className="space-y-6 pb-20">
-      {error && (
-        <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-red-300 text-sm">{error}</div>
-      )}
+  const card = 'p-3 bg-surface rounded-lg';
+  const btn = 'px-3 py-2 bg-primary hover:bg-primary-dark disabled:opacity-40 rounded text-sm whitespace-nowrap';
+  const wide = 'w-full py-3 px-4 rounded-lg font-medium transition-colors';
 
-      {/* Instructions Phase */}
+  const statusTitle = analyzing
+    ? 'Analyzing…'
+    : !playing
+      ? 'Starting…'
+      : live.total === 0
+        ? 'Waiting for clicks…'
+        : !allRoomsDone
+          ? `Go to ${nextRoom?.name}`
+          : closingDone
+            ? 'All done'
+            : `Back to ${firstRoom?.name}`;
+
+  const signalQuality = (() => {
+    const fresh = signal !== null && signal.ageS < 5;
+    if (!fresh) return { label: 'No click yet', color: 'bg-gray-500', width: 0 };
+    const q = signal.snr >= 40 ? 'Good' : signal.snr >= 15 ? 'OK' : 'Weak: turn it up or move closer';
+    const color = signal.snr >= 40 ? 'bg-green-500' : signal.snr >= 15 ? 'bg-yellow-500' : 'bg-red-500';
+    return { label: q, color, width: Math.max(8, Math.min(100, (Math.log10(Math.max(signal.snr, 1)) / 2.5) * 100)) };
+  })();
+
+  return (
+    <div className="space-y-4 pb-20">
+      {error && <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-red-300 text-sm">{error}</div>}
+
+      {/* Ready */}
       {phase === 'instructions' && (
         <>
-          <div className="text-center">
-            <div className="text-6xl mb-4">📱</div>
-            <h2 className="text-2xl font-bold mb-2">How this works</h2>
-            <p className="text-text-muted">
-              A click track plays on the whole group while your phone records. All speakers keep
-              playing the whole time (that&apos;s what keeps them in sync); when you tap <b>Measure here</b> the others are
-              muted briefly so only the one next to you is heard. Rooms are compared inside one recording, so
-              nothing needs to be lined up in advance.
-            </p>
-          </div>
-
-          <div className="p-4 bg-blue-900/20 border border-blue-700/50 rounded-lg text-blue-300 text-sm">
-            <ul className="list-disc list-inside text-blue-300/70 space-y-1">
-              <li>The players must be in one sync group in Music Assistant (so they play the same stream)</li>
-              <li>Hold the phone at the same distance (about 1 m) from each speaker. 1 m closer makes a speaker arrive about 3 ms earlier, so in a shared room keep the phone centred between them</li>
-              <li>About 12 seconds per room, plus a return to the first room at the end to correct clock drift</li>
-              <li>Keep the rooms quiet; keep the phone still while measuring. The other players are muted automatically while each room is measured (and restored after), so speakers sharing a room are fine.</li>
-            </ul>
-          </div>
+          <h2 className="text-2xl font-bold text-center">Ready</h2>
 
           {leaders.length > 1 && (
-            <div className="p-4 bg-red-900/20 border border-red-700/50 rounded-lg text-red-300 text-sm space-y-2">
-              <p className="font-medium">These players are not in the same sync group.</p>
-              <p className="text-red-300/70">
-                Players that aren&apos;t grouped start the track at different times, so the numbers
-                would be meaningless. Group them in Music Assistant first, or choose the group to play on:
-              </p>
-              <details className="text-xs text-red-300/70">
-                <summary className="cursor-pointer">What Music Assistant reports</summary>
-                <div className="mt-1 space-y-1 font-mono break-all">
-                  {selectedPlayers.map((p) => (
-                    <div key={p.player_id}>
-                      {p.name} (id {p.player_id}, type {p.type}): synced_to={String(p.synced_to ?? null)},
-                      active_group={String(p.active_group ?? null)}, group_members=
-                      {JSON.stringify(p.group_members ?? null)} &rarr; group #{groups.groupIndex[p.player_id] + 1}
-                    </div>
-                  ))}
-                </div>
-              </details>
+            <div className="p-3 bg-red-900/20 border border-red-700/50 rounded-lg text-red-300 text-sm space-y-2">
+              <p className="font-medium">These speakers aren&apos;t in one sync group.</p>
               <select
                 value={playTarget}
                 onChange={(e) => setPlayOn(e.target.value)}
@@ -311,189 +290,116 @@ export function CalibrationWizard() {
               >
                 {leaders.map((id) => (
                   <option key={id} value={id}>
-                    {nameOf(id)}
+                    Play on {nameOf(id)}
                   </option>
                 ))}
               </select>
+              <details className="text-xs text-red-300/70">
+                <summary className="cursor-pointer">What MA reports</summary>
+                <div className="mt-1 space-y-1 font-mono break-all">
+                  {selectedPlayers.map((p) => (
+                    <div key={p.player_id}>
+                      {p.name}: synced_to={String(p.synced_to ?? null)}, active_group={String(p.active_group ?? null)},
+                      group_members={JSON.stringify(p.group_members ?? null)}
+                    </div>
+                  ))}
+                </div>
+              </details>
             </div>
           )}
 
-          <div className="p-3 bg-surface rounded-lg text-sm space-y-3">
-            <div>
-              <div className="text-text-muted">Track plays on (sync group leader):</div>
-              <div className="font-medium">
-                {nameOf(playTarget)}
-                {!selectedPlayers.some((p) => p.player_id === playTarget) && (
-                  <span className="text-xs text-text-muted ml-2">not one of the measured rooms</span>
+          <div className={`${card} space-y-2`}>
+            {selectedPlayers.map((p, i) => (
+              <div key={p.player_id} className="flex items-center gap-2">
+                <span className="flex-1 font-medium">
+                  {p.name}
+                  {i === 0 && <span className="ml-2 text-xs px-1.5 py-0.5 bg-primary/30 rounded">Reference</span>}
+                  {p.player_id === playTarget && (
+                    <span className="ml-2 text-xs px-1.5 py-0.5 bg-gray-700 rounded">Leader</span>
+                  )}
+                </span>
+                {i > 0 && (
+                  <button
+                    onClick={() => makeReference(p.player_id)}
+                    className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                  >
+                    Make reference
+                  </button>
                 )}
               </div>
-              <div className="text-xs text-text-muted">Chosen automatically from the group in Music Assistant.</div>
-            </div>
-            <div>
-              <div className="text-text-muted mb-1">Rooms, in measuring order:</div>
-              <div className="space-y-2">
-                {selectedPlayers.map((p, i) => (
-                  <div key={p.player_id} className="flex items-center gap-2">
-                    <span className="flex-1 font-medium">
-                      {p.name}
-                      {i === 0 && <span className="ml-2 text-xs px-1.5 py-0.5 bg-primary/30 rounded">Reference</span>}
-                      {p.player_id === playTarget && (
-                        <span className="ml-2 text-xs px-1.5 py-0.5 bg-gray-700 rounded">Group leader</span>
-                      )}
-                    </span>
-                    {i > 0 && (
-                      <button
-                        onClick={() => makeReference(p.player_id)}
-                        className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
-                      >
-                        Make reference
-                      </button>
-                    )}
-                  </div>
-                ))}
+            ))}
+            {unselectedMembers.length > 0 && (
+              <div className="text-xs text-text-muted">
+                Muted while measuring: {unselectedMembers.map((p) => p.name).join(', ')}
               </div>
-              {unselectedMembers.length > 0 && (
-                <div className="text-xs text-yellow-300 mt-2">
-                  Also in this group, so it plays along: {unselectedMembers.map((p) => p.name).join(', ')}. It is
-                  muted automatically while each room is measured and restored after, but isn&apos;t measured. To
-                  measure it too, select it.
-                </div>
-              )}
-              <div className="text-xs text-text-muted mt-2">
-                The reference is measured first and last, and is the baseline the others are compared to.
-                While one room is measured, the other players are muted automatically and restored after.
-              </div>
-            </div>
+            )}
           </div>
+
+          <p className="text-sm text-text-muted text-center">Keep the phone about 1 m from each speaker.</p>
 
           <button
             onClick={handleStart}
             disabled={selectedPlayers.length < 2}
-            className="w-full py-3 px-4 bg-primary hover:bg-primary-dark disabled:opacity-50
-                       rounded-lg font-medium transition-colors"
+            className={`${wide} bg-primary hover:bg-primary-dark disabled:opacity-50`}
           >
-            {selectedPlayers.length < 2 ? 'Select at least 2 players' : 'Start - stand in the first room'}
+            {selectedPlayers.length < 2 ? 'Select at least 2 speakers' : 'Start'}
           </button>
-
           {Object.keys(results).length > 0 && (
-            <button
-              onClick={() => setPhase('results')}
-              className="w-full py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium transition-colors"
-            >
-              View last results
+            <button onClick={() => setPhase('results')} className={`${wide} bg-secondary hover:bg-secondary/80`}>
+              Last results
             </button>
           )}
-
-          <button
-            onClick={handleBack}
-            className="w-full py-3 px-4 bg-surface hover:bg-gray-700 rounded-lg font-medium transition-colors"
-          >
-            Back to Player Selection
+          <button onClick={handleBack} className={`${wide} bg-surface hover:bg-gray-700`}>
+            Back
           </button>
         </>
       )}
 
-      {/* Listening Phase */}
+      {/* Measuring */}
       {phase === 'listening' && (
         <>
-          <div className="text-center">
-            <div className="text-6xl mb-4 animate-pulse">🎤</div>
-            <h2 className="text-2xl font-bold mb-2">
-              {analyzing ? 'Analyzing...' : !playing ? 'Starting playback...' : live.total === 0 ? 'Waiting for the clicks...' : allRoomsDone && !closingDone ? 'Go back to the first room' : nextRoom ? `Go to ${nextRoom.name}` : 'All done'}
-            </h2>
-            <p className="text-text-muted text-sm">
-              {live.total === 0 && playing
-                ? 'Some players take a few seconds to start. Stay in the first room.'
-                : `Heard ${live.total} click${live.total === 1 ? '' : 's'} so far. ${Math.round(live.remaining)} s of track left.`}
-            </p>
-          </div>
+          <h2 className="text-2xl font-bold text-center">{statusTitle}</h2>
+
+          {live.total > 0 && (
+            <div>
+              <div className="flex justify-between text-xs text-text-muted mb-1">
+                <span>Signal</span>
+                <span>{signalQuality.label}</span>
+              </div>
+              <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className={`h-full ${signalQuality.color}`}
+                  style={{ width: `${signalQuality.width}%`, transition: 'width 300ms ease-out' }}
+                />
+              </div>
+            </div>
+          )}
 
           {live.total === 0 && playing && waitedS >= 8 && (
-            <div className="p-3 bg-surface border border-gray-600 rounded-lg text-sm space-y-1">
-              <p className="font-medium">Still waiting ({Math.round(waitedS)} s). What&apos;s happening:</p>
+            <div className={`${card} text-sm text-text-muted space-y-1`}>
               {diagnostics === null ? (
-                <p className="text-text-muted">Checking...</p>
+                <p>Checking…</p>
               ) : (
-                <ul className="list-disc list-inside text-text-muted space-y-1">
-                  <li>
-                    {diagnostics.trackRequests === null
-                      ? 'Could not check whether Music Assistant fetched the click track (not running through the GroupSync dev server).'
-                      : diagnostics.trackRequests === 0
-                        ? 'Music Assistant has NOT requested the click track from this computer. It probably can\'t reach it: allow incoming connections for Node on port 5174 in your computer\'s firewall, and check MA and this computer are on the same network.'
-                        : `Music Assistant fetched the click track ${diagnostics.trackRequests} time(s)${diagnostics.lastRequestAgoS !== null ? `, last ${diagnostics.lastRequestAgoS} s ago` : ''}${diagnostics.lastRequestIp ? ` from ${diagnostics.lastRequestIp}` : ''}. So it is playing or about to; some players take 10-30 s to start.`}
-                  </li>
-                  <li>
-                    {diagnostics.playbackState
-                      ? `${diagnostics.playerName} is "${diagnostics.playbackState}" in Music Assistant.`
-                      : `Music Assistant doesn't report a playback state for ${diagnostics.playerName}.`}
-                  </li>
-                  {diagnostics.trackRequests !== null && diagnostics.trackRequests > 0 && (
-                    <li>If it says playing but you hear nothing: check the volume and that nothing in the group is muted.</li>
+                <>
+                  {diagnostics.trackRequests === 0 && (
+                    <p>MA hasn&apos;t fetched the click track. Allow Node through your firewall on port 5174.</p>
                   )}
-                </ul>
+                  {diagnostics.trackRequests !== null && diagnostics.trackRequests > 0 && (
+                    <p>MA fetched the track. Some players take 10-30 s to start. Check volume and mute.</p>
+                  )}
+                  {diagnostics.playbackState && (
+                    <p>
+                      {diagnostics.playerName}: {diagnostics.playbackState}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           )}
 
-          {live.timedOut && (
-            <div className="p-3 bg-red-900/20 border border-red-700/50 rounded-lg text-red-300 text-sm">
-              No clicks heard after 40 s. Check that the speakers are playing, the volume is up, and the
-              phone is close. If MA reports a playback error, the click track URL may not be reachable
-              from your Music Assistant server.
-            </div>
-          )}
-
-          {measuringLeft > 0 && (
-            <div className="p-3 bg-primary/20 border border-primary rounded-lg text-sm text-center">
-              Measuring <b>{measuringName}</b>. All speakers keep playing in sync; the others are muted for
-              these few seconds so only this one is heard. Hold the phone still.
-            </div>
-          )}
-
           {muteProblems.length > 0 && (
-            <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm space-y-1">
-              <p className="font-medium">Couldn&apos;t mute every other player while measuring:</p>
-              <ul className="list-disc list-inside text-yellow-300/70">
-                {muteProblems.map((m) => (
-                  <li key={m.name}>
-                    {m.name}: {m.reason}
-                  </li>
-                ))}
-              </ul>
-              <p className="text-yellow-300/70">
-                Those players will still be audible in other rooms, which can blur results if they share a
-                room with the one being measured. Mute them by hand (on the device or in MA) before tapping
-                Measure here.
-              </p>
-            </div>
-          )}
-
-          {/* Signal strength of the clicks being heard, not raw room noise: updates when a click lands */}
-          {live.total > 0 && (
-            <div>
-              {(() => {
-                const fresh = signal !== null && signal.ageS < 5;
-                const quality = !fresh ? 'none' : signal.snr >= 40 ? 'good' : signal.snr >= 15 ? 'ok' : 'weak';
-                const color = { none: 'bg-gray-500', good: 'bg-green-500', ok: 'bg-yellow-500', weak: 'bg-red-500' }[quality];
-                const width = fresh ? Math.max(8, Math.min(100, (Math.log10(Math.max(signal.snr, 1)) / 2.5) * 100)) : 0;
-                const text = {
-                  none: 'No click heard in the last few seconds',
-                  good: 'Good signal',
-                  ok: 'OK signal',
-                  weak: 'Weak signal: turn that speaker up or move the phone closer',
-                }[quality];
-                return (
-                  <>
-                    <div className="flex justify-between text-xs text-text-muted mb-1">
-                      <span>Click signal</span>
-                      <span>{text}</span>
-                    </div>
-                    <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
-                      <div className={`h-full ${color}`} style={{ width: `${width}%`, transition: 'width 300ms ease-out' }} />
-                    </div>
-                  </>
-                );
-              })()}
+            <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
+              Couldn&apos;t mute: {muteProblems.map((m) => m.name).join(', ')}. Mute by hand before measuring.
             </div>
           )}
 
@@ -505,73 +411,59 @@ export function CalibrationWizard() {
               const heardNothing = lastOutcome?.id === player.player_id && lastOutcome.clicks === 0;
               const warnings = reading?.warnings ?? [];
               return (
-                <div key={player.player_id} className="p-3 bg-surface rounded-lg space-y-2">
+                <div key={player.player_id} className={`${card} space-y-1`}>
                   <div className="flex items-center gap-3">
-                    <div className="text-xl">{done ? (warnings.length ? '⚠️' : '✅') : isMeasuring ? '⏺' : '🔊'}</div>
-                    <div className="flex-1">
-                      <div className="font-medium">{player.name}</div>
-                      <div className="text-xs text-text-muted">
-                        {[i === 0 ? 'Reference room' : '', player.player_id === playTarget ? 'Group leader' : '']
-                          .filter(Boolean)
-                          .join(' · ')}
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">
+                        {done ? (warnings.length ? '⚠️ ' : '✅ ') : ''}
+                        {player.name}
+                        {i === 0 && <span className="ml-2 text-xs text-text-muted">reference</span>}
                       </div>
+                      {done && (
+                        <div className="text-xs text-text-muted font-mono">
+                          {i === 0
+                            ? 'baseline'
+                            : reading.arrivalMs === null
+                              ? 'needs reference'
+                              : `${reading.arrivalMs > 0 ? '+' : ''}${reading.arrivalMs.toFixed(0)} ms`}
+                          {` · ${reading.clicks} clicks`}
+                        </div>
+                      )}
                     </div>
                     <button
                       onClick={() => startMeasurement(player.player_id, 'primary')}
                       disabled={!playing || live.total === 0 || measuring}
-                      className="px-3 py-2 bg-primary hover:bg-primary-dark disabled:opacity-40 rounded text-sm"
+                      className={btn}
                     >
-                      {isMeasuring ? `Hold still ${measuringLeft}s` : done ? 'Measure again' : 'Measure here'}
+                      {isMeasuring ? `${progressClicks} clicks…` : done ? 'Redo' : 'Measure'}
                     </button>
                   </div>
-                  {done && (
-                    <div className="text-xs text-text-muted font-mono">
-                      {i === 0
-                        ? 'baseline'
-                        : reading.arrivalMs === null
-                          ? 'measure the reference room first'
-                          : `${reading.arrivalMs > 0 ? '+' : ''}${reading.arrivalMs.toFixed(1)} ms vs reference`}
-                      {' · '}
-                      {reading.clicks} clicks
-                      {reading.spreadMs !== null && ` · ±${reading.spreadMs.toFixed(1)} ms`}
-                    </div>
-                  )}
-                  {warnings.length > 0 && (
-                    <ul className="text-xs text-yellow-300 list-disc list-inside">
-                      {warnings.map((w) => (
-                        <li key={w}>{w}</li>
-                      ))}
-                      <li className="list-none text-yellow-300/70">Tap Measure again to redo this room.</li>
-                    </ul>
-                  )}
-                  {heardNothing && (
-                    <div className="text-xs text-red-300">
-                      Heard nothing that time{done ? ' (the earlier measurement was kept)' : ''}. Move closer to this
-                      speaker, check it isn&apos;t muted or paused, and try again.
-                    </div>
-                  )}
+                  {warnings.length > 0 && <div className="text-xs text-yellow-300">{warnings.join(' · ')}</div>}
+                  {heardNothing && <div className="text-xs text-red-300">Heard nothing. Move closer and retry.</div>}
                 </div>
               );
             })}
 
             {firstRoom && selectedPlayers.length > 1 && (
-              <div className="p-3 bg-surface rounded-lg space-y-2">
+              <div className={card}>
                 <div className="flex items-center gap-3">
-                  <div className="text-xl">{closingDone ? '✅' : '🔁'}</div>
                   <div className="flex-1">
-                    <div className="font-medium">{firstRoom.name} again</div>
-                    <div className="text-xs text-text-muted">Corrects clock drift (recommended)</div>
+                    <div className="font-medium">
+                      {closingDone ? '✅ ' : ''}
+                      {firstRoom.name} again
+                    </div>
+                    <div className="text-xs text-text-muted">Drift check</div>
                   </div>
                   <button
                     onClick={() => startMeasurement(firstRoom.player_id, 'closing')}
                     disabled={!allRoomsDone || measuring}
-                    className="px-3 py-2 bg-primary hover:bg-primary-dark disabled:opacity-40 rounded text-sm"
+                    className={btn}
                   >
-                    {measuringId === 'closing' ? `Hold still ${measuringLeft}s` : closingDone ? 'Measure again' : 'Measure here'}
+                    {measuringId === 'closing' ? `${progressClicks} clicks…` : closingDone ? 'Redo' : 'Measure'}
                   </button>
                 </div>
                 {lastOutcome?.id === 'closing' && lastOutcome.clicks === 0 && (
-                  <div className="text-xs text-red-300">Heard nothing that time. Try again.</div>
+                  <div className="text-xs text-red-300 mt-1">Heard nothing. Retry.</div>
                 )}
               </div>
             )}
@@ -580,172 +472,99 @@ export function CalibrationWizard() {
           <button
             onClick={() => sessionRef.current?.finish()}
             disabled={!allRoomsDone || measuring || analyzing}
-            className="w-full py-3 px-4 bg-secondary hover:bg-secondary/80 disabled:opacity-40
-                       rounded-lg font-medium transition-colors"
+            className={`${wide} bg-secondary hover:bg-secondary/80 disabled:opacity-40`}
           >
-            {closingDone ? 'Finish' : 'Finish without drift check'}
+            Finish
           </button>
-
-          <button
-            onClick={handleCancelCalibration}
-            className="w-full py-3 px-4 bg-surface hover:bg-gray-700 rounded-lg font-medium transition-colors"
-          >
+          <button onClick={handleCancelCalibration} className={`${wide} bg-surface hover:bg-gray-700`}>
             Cancel
           </button>
         </>
       )}
 
-      {/* Results Phase */}
+      {/* Results */}
       {phase === 'results' && (
         <>
-          <div className="text-center">
-            <div className="text-6xl mb-4">✅</div>
-            <h2 className="text-2xl font-bold mb-2">
-              How far each speaker is from {referenceResult?.playerName ?? 'the reference'}
-            </h2>
-            <p className="text-text-muted">
-              {referenceResult?.playerName ?? 'The reference'} is the baseline and stays as it is. Everything
-              else is compared to it.
-            </p>
-          </div>
+          <h2 className="text-2xl font-bold text-center">vs {referenceResult?.playerName ?? 'reference'}</h2>
 
           {referenceResult?.warnings && referenceResult.warnings.length > 0 && (
             <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
-              <p className="font-medium">The baseline ({referenceResult.playerName}) was shaky:</p>
-              <ul className="list-disc list-inside text-yellow-300/70">
-                {referenceResult.warnings.map((w) => (
-                  <li key={w}>{w}</li>
-                ))}
-              </ul>
-              <p className="text-yellow-300/70">
-                Every number below is measured against it, so it inherits that uncertainty. Measure it again, or
-                choose a steadier speaker with <b>Make reference</b> and run the test again.
-              </p>
+              Reference was shaky ({referenceResult.warnings.join(' · ')}), so everything below is less certain.
+              Redo it, or pick a steadier reference.
             </div>
           )}
 
           {Object.keys(results).length === 0 ? (
-            <div className="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm text-center">
-              No results yet.
-            </div>
+            <div className="p-3 text-center text-text-muted">No results.</div>
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-3">
               {Object.entries(results).map(([playerId, result]) => {
                 const arrival = result.arrivalMs;
                 const ms = arrival === undefined ? 0 : Math.round(Math.abs(arrival));
                 const inSync = arrival !== undefined && ms <= IN_SYNC_MS;
                 return (
-                  <div key={playerId} className="p-4 bg-surface rounded-lg space-y-2">
-                    <div className="flex justify-between items-baseline">
-                      <span className="font-medium">
-                        {result.playerName}
-                        {result.isReference && (
-                          <span className="text-xs ml-2 px-1.5 py-0.5 bg-primary/30 rounded">Baseline</span>
-                        )}
-                      </span>
+                  <div key={playerId} className={`${card} space-y-1`}>
+                    <div className="font-medium">
+                      {result.playerName}
+                      {result.isReference && <span className="ml-2 text-xs text-text-muted">reference</span>}
                     </div>
 
-                    {result.isReference ? (
-                      <p className="text-text-muted">The others are compared to this speaker.</p>
-                    ) : arrival === undefined ? (
-                      <p className="text-red-300">No clicks heard. Measure this room again.</p>
+                    {result.isReference ? null : arrival === undefined ? (
+                      <p className="text-red-300">No clicks heard. Measure again.</p>
                     ) : inSync ? (
-                      <>
-                        <p className="text-lg font-semibold text-green-300">
-                          In sync with {referenceResult?.playerName}
-                        </p>
-                        <p className="text-xs text-text-muted">
-                          Measured {ms} ms {arrival > 0 ? 'late' : 'early'}, which is within what this method can
-                          reliably measure (about ±5 ms) and too small to hear. Leave it as it is; chasing it can make
-                          the next test read the other way.
-                        </p>
-                      </>
+                      <p className="text-lg font-semibold text-green-300">In sync (±{IN_SYNC_MS} ms)</p>
                     ) : (
                       <>
                         <p className={`text-2xl font-bold ${arrival > 0 ? 'text-orange-300' : 'text-blue-300'}`}>
                           {ms} ms {arrival > 0 ? 'late' : 'early'}
                         </p>
-                        <p className="text-sm">
-                          Plays {ms} ms {arrival > 0 ? 'after' : 'before'} {referenceResult?.playerName}. To fix it,
-                          make it play <b>{ms} ms {arrival > 0 ? 'earlier' : 'later'}</b>.
+                        <p className="text-sm text-text-muted">
+                          Play {ms} ms {arrival > 0 ? 'earlier' : 'later'}
                         </p>
+                        {result.setting ? (
+                          <div className="flex items-center gap-2 text-sm pt-1">
+                            <span className="text-text-muted">
+                              {result.setting.label}: {result.setting.current} →
+                            </span>
+                            <input
+                              type="number"
+                              step="1"
+                              value={result.offsetMs}
+                              onChange={(e) => updateOffset(playerId, parseFloat(e.target.value) || 0)}
+                              className="w-20 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
+                            />
+                            <button
+                              onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
+                              className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                            >
+                              Copy
+                            </button>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-text-muted">No delay setting found in MA for this speaker.</p>
+                        )}
+                        {result.setting && (
+                          <p className="text-xs text-text-muted">
+                            Higher = plays {result.setting.higherIsEarlier ? 'earlier' : 'later (unverified)'}
+                            {result.clamped && ` · limit ${result.setting.min} to ${result.setting.max}`}
+                          </p>
+                        )}
                       </>
                     )}
 
-                    {!result.isReference && arrival !== undefined && !inSync && (
-                      <div className="text-sm space-y-1">
-                        {result.setting ? (
-                          <>
-                            <div className="text-text-muted">{result.setting.label} in Music Assistant:</div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-text-muted">Now {result.setting.current} &rarr;</span>
-                              <input
-                                type="number"
-                                step="1"
-                                value={result.offsetMs}
-                                onChange={(e) => updateOffset(playerId, parseFloat(e.target.value) || 0)}
-                                className="w-24 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
-                              />
-                              <span className="text-text-muted">ms</span>
-                              <button
-                                onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
-                                className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
-                              >
-                                Copy
-                              </button>
-                            </div>
-                            <p className="text-xs text-text-muted">
-                              {result.setting.higherIsEarlier
-                                ? 'A higher value makes this speaker play earlier, a lower one later.'
-                                : 'Assumed: a higher value makes this speaker play later. Not verified for this setting, so check the direction on one speaker first.'}
-                              {result.setting.configPlayerId !== playerId &&
-                                ' (This setting lives on the device\'s Sendspin protocol player under Output protocols.)'}
-                            </p>
-                            {result.clamped && (
-                              <p className="text-xs text-yellow-300">
-                                That is as far as this setting goes ({result.setting.min} to {result.setting.max} ms), so
-                                it can&apos;t fully correct this speaker. Move the other speakers instead.
-                              </p>
-                            )}
-                          </>
-                        ) : (
-                          <p className="text-xs text-text-muted">
-                            No delay setting was found for this speaker in Music Assistant. Apply the change
-                            ({arrival > 0 ? 'earlier' : 'later'} by {ms} ms) wherever you set its delay.
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="text-xs text-text-muted">
-                      {result.detectedClicks} clicks used
-                      {result.spreadMs !== undefined && ` · ±${result.spreadMs.toFixed(1)} ms between clicks`}
-                    </div>
                     {result.warnings && result.warnings.length > 0 && (
-                      <ul className="text-xs text-yellow-300 list-disc list-inside">
-                        {result.warnings.map((w) => (
-                          <li key={w}>{w}</li>
-                        ))}
-                        <li className="list-none text-yellow-300/70">
-                          Consider measuring this one again before trusting the value.
-                        </li>
-                      </ul>
+                      <p className="text-xs text-yellow-300">{result.warnings.join(' · ')}</p>
                     )}
                   </div>
                 );
               })}
               {((driftPpm !== null && Math.abs(driftPpm) > 100) || audioGaps > 0) && (
-                <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
-                  {audioGaps > 0
-                    ? `The microphone stream had ${audioGaps} dropout(s), which shifts the timing. `
-                    : `Clock drift of ${driftPpm?.toFixed(0)} ppm is unusually high (normal is under ~50). `}
-                  Treat these numbers as approximate and measure again.
-                </div>
+                <p className="text-sm text-yellow-300">
+                  {audioGaps > 0 ? 'Mic dropouts' : `High clock drift (${driftPpm?.toFixed(0)} ppm)`}: results are
+                  approximate. Measure again.
+                </p>
               )}
-              <p className="text-xs text-text-muted">
-                Measured with whatever delays are set right now, so these are changes from your current setup, not new absolute values.
-                {driftPpm !== null && ` Clock drift corrected: ${driftPpm.toFixed(0)} ppm.`}
-              </p>
+              <p className="text-xs text-text-muted">Values are changes from your current settings.</p>
             </div>
           )}
 
@@ -762,29 +581,21 @@ export function CalibrationWizard() {
                 }
               }}
             />
-            Automatically push each result to Music Assistant
+            Push to Music Assistant automatically
           </label>
 
-          {/* Push Results */}
           {pushResults && (
-            <div className="space-y-2">
-              <h3 className="font-medium text-sm text-text-muted">Push Results</h3>
+            <div className="space-y-1">
               {pushResults.map((result) => (
                 <div
                   key={result.playerId}
-                  className={`p-3 rounded-lg text-sm flex items-center gap-2 ${
-                    result.success
-                      ? 'bg-green-900/20 border border-green-700/50 text-green-300'
-                      : 'bg-red-900/20 border border-red-700/50 text-red-300'
+                  className={`p-2 rounded text-sm flex gap-2 ${
+                    result.success ? 'bg-green-900/20 text-green-300' : 'bg-red-900/20 text-red-300'
                   }`}
                 >
                   <span>{result.success ? '✓' : '✗'}</span>
                   <span className="flex-1">{result.playerName}</span>
-                  {result.success ? (
-                    <span className="text-xs opacity-75">via {result.method}</span>
-                  ) : (
-                    <span className="text-xs opacity-75">{result.error}</span>
-                  )}
+                  {!result.success && <span className="text-xs opacity-75">{result.error}</span>}
                 </div>
               ))}
             </div>
@@ -797,42 +608,27 @@ export function CalibrationWizard() {
                 setPushResults(null);
               }}
               disabled={isPushing}
-              className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-50
-                         rounded-lg font-medium transition-colors"
+              className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-50 rounded-lg font-medium"
             >
-              Measure Again
+              Measure again
             </button>
             <button
               onClick={handleApplyOffsets}
               disabled={Object.keys(results).length === 0 || isPushing}
-              className="flex-1 py-3 px-4 bg-primary hover:bg-primary-dark disabled:opacity-50
-                         rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+              className="flex-1 py-3 px-4 bg-primary hover:bg-primary-dark disabled:opacity-50 rounded-lg font-medium"
             >
-              {isPushing ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Applying...
-                </>
-              ) : pushResults?.every((r) => r.success) ? (
-                'Done!'
-              ) : (
-                'Push to Music Assistant'
-              )}
+              {isPushing ? 'Pushing…' : 'Push to MA'}
             </button>
           </div>
-
-          {pushResults?.every((r) => r.success) && (
-            <button
-              onClick={() => {
-                setPhase('idle');
-                setPushResults(null);
-              }}
-              className="w-full py-3 px-4 bg-secondary hover:bg-secondary/80
-                         rounded-lg font-medium transition-colors"
-            >
-              Finish
-            </button>
-          )}
+          <button
+            onClick={() => {
+              setPhase('idle');
+              setPushResults(null);
+            }}
+            className={`${wide} bg-secondary hover:bg-secondary/80`}
+          >
+            Done
+          </button>
         </>
       )}
     </div>

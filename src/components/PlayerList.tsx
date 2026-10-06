@@ -44,11 +44,8 @@ export function PlayerList() {
   return (
     <div className="space-y-6 pb-24">
       <div>
-        <h2 className="text-2xl font-bold mb-2">Select Players</h2>
-        <p className="text-text-muted">
-          Select the individual speakers to calibrate (e.g. each of Shield, Sonos, Droid), not the group
-          they&apos;re in. They must already be in one sync group in Music Assistant.
-        </p>
+        <h2 className="text-2xl font-bold">Speakers</h2>
+        <p className="text-text-muted text-sm">Pick the speakers to compare. They need to share a sync group in Music Assistant.</p>
       </div>
 
       {loading ? (
@@ -60,17 +57,14 @@ export function PlayerList() {
         <>
           {noPlayersFound && (
             <div className="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
-              <p className="font-medium mb-1">No players found</p>
-              <p className="text-yellow-300/70">
-                Make sure your players are connected to Music Assistant and powered on.
-              </p>
+              No players found.
             </div>
           )}
 
           {ghostPlayers.length > 0 && (
             <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm flex items-center gap-3">
               <span className="flex-1">
-                {ghostPlayers.length} leftover &quot;GroupSync&quot; player(s) in Music Assistant.
+                {ghostPlayers.length} leftover &quot;GroupSync&quot; player(s).
               </span>
               <button
                 onClick={handleCleanup}
@@ -120,8 +114,7 @@ export function PlayerList() {
                   <div className="flex-1 text-left min-w-0">
                     <div className="font-medium truncate">{player.name}</div>
                     <div className="text-sm text-text-muted">
-                      {isGroup ? 'Group - select its speakers instead' : isAvailable ? 'Available' : 'Offline'}
-                      {player.type && ` · ${player.type}`}
+                      {isGroup ? 'Group: pick its speakers instead' : isAvailable ? 'Available' : 'Offline'}
                     </div>
                   </div>
                   <div className={`w-2 h-2 rounded-full shrink-0 ${isAvailable ? 'bg-secondary' : 'bg-gray-500'}`} />

@@ -12,7 +12,7 @@
  */
 
 import { MicRecorder } from './MicRecorder';
-import { analyzeRooms, detectClicks, qualityWarnings, MAX_NORMAL_WIDTH_MS } from './ClickAnalyzer';
+import { analyzeRooms, detectClicks, indexClicks, qualityWarnings, MAX_NORMAL_WIDTH_MS } from './ClickAnalyzer';
 import type { DetectedClick, RoomAnalysis } from './ClickAnalyzer';
 import type { CalibrationConfig, CalibrationResult } from '../types';
 import { DEFAULT_CALIBRATION_CONFIG } from '../types';
@@ -31,6 +31,7 @@ export type CalibrationEventType =
   | 'playback_started'
   | 'clicks_heard'
   | 'room_measuring'
+  | 'room_progress'
   | 'room_measured'
   | 'mute_problems'
   | 'analyzing'
@@ -68,8 +69,10 @@ export type MeasurementKind = 'primary' | 'closing';
 
 /** Seconds of settling time after the other players are muted before clicks count */
 const GUARD_S = 1.5;
-/** Seconds of recording that count for one room */
-const WINDOW_S = 10;
+/** A room's measurement ends as soon as it is stable, but never before this many seconds... */
+const MIN_WINDOW_S = 6;
+/** ...and never goes on longer than this */
+const MAX_WINDOW_S = 15;
 /** Sendspin/MA can take a while to start the stream; give up waiting after this */
 const HEAR_TIMEOUT_S = 40;
 interface Measurement {
@@ -85,7 +88,7 @@ export class CalibrationSession {
   private config: CalibrationConfig;
   private eventCallback: CalibrationEventCallback | null = null;
   private liveTimer: ReturnType<typeof setInterval> | null = null;
-  private windowTimer: ReturnType<typeof setTimeout> | null = null;
+  private windowTimer: ReturnType<typeof setInterval> | null = null;
   private measurements: Measurement[] = [];
   private playing = false;
   private measuring = false;
@@ -130,10 +133,6 @@ export class CalibrationSession {
     return Math.min(300, 100 + (this.rooms.length + 1) * 40);
   }
 
-  get windowSeconds(): number {
-    return WINDOW_S;
-  }
-
   async start(callback: CalibrationEventCallback): Promise<void> {
     if (this.isRunning) throw new Error('Calibration already running');
     this.eventCallback = callback;
@@ -175,7 +174,7 @@ export class CalibrationSession {
   async measureRoom(playerId: string, kind: MeasurementKind = 'primary'): Promise<void> {
     if (!this.isRunning || this.windowTimer || this.measuring) return;
     this.measuring = true;
-    this.emit({ type: 'room_measuring', data: { playerId, kind, seconds: GUARD_S + WINDOW_S } });
+    this.emit({ type: 'room_measuring', data: { playerId, kind } });
 
     await this.applyMutes(playerId);
     if (!this.isRunning) {
@@ -185,14 +184,21 @@ export class CalibrationSession {
     }
 
     const startTime = this.recorder.elapsed + GUARD_S;
-    const endTime = startTime + WINDOW_S;
-    this.windowTimer = setTimeout(async () => {
+    let finalizing = false;
+    // Check once a second; stop as soon as the clicks agree with each other
+    this.windowTimer = setInterval(async () => {
+      if (!this.isRunning || finalizing) return;
+      const length = Math.min(this.recorder.elapsed - startTime, MAX_WINDOW_S);
+      if (length < 1) return;
+      const endTime = startTime + length;
+      const clicks = this.clicksBetween(startTime, endTime);
+      this.emit({ type: 'room_progress', data: { playerId, kind, clicks: clicks.length } });
+      if (!(length >= MAX_WINDOW_S || (length >= MIN_WINDOW_S && this.isStable(clicks)))) return;
+
+      finalizing = true;
+      if (this.windowTimer) clearInterval(this.windowTimer);
       this.windowTimer = null;
       await this.restoreMutes();
-      const samples = this.recorder.getSamples(startTime - 0.3, endTime + 0.3);
-      const clicks = detectClicks(samples, this.recorder.sampleRate, this.config.frequencies, startTime - 0.3).filter(
-        (c) => c.time >= startTime && c.time <= endTime
-      );
       if (clicks.length > 0) {
         this.measurements = this.measurements.filter((m) => !(m.playerId === playerId && m.kind === kind));
         this.measurements.push({ playerId, kind, startTime, endTime, clicks });
@@ -202,7 +208,29 @@ export class CalibrationSession {
         type: 'room_measured',
         data: { playerId, kind, clicks: clicks.length, readings: this.readings() },
       });
-    }, (GUARD_S + WINDOW_S) * 1000 + 300);
+    }, 1000);
+  }
+
+  private clicksBetween(startTime: number, endTime: number): DetectedClick[] {
+    const samples = this.recorder.getSamples(startTime - 0.3, endTime + 0.3);
+    return detectClicks(samples, this.recorder.sampleRate, this.config.frequencies, startTime - 0.3).filter(
+      (c) => c.time >= startTime && c.time <= endTime
+    );
+  }
+
+  /**
+   * Enough clicks that agree with each other (spread between clicks under ~1 ms), or a few more
+   * that agree a little less. Clicks come one per second, so this takes about 6-8 s when the
+   * signal is clean and longer when it is weak.
+   */
+  private isStable(clicks: DetectedClick[]): boolean {
+    const { clicks: indexed } = indexClicks(clicks, this.config.frequencies.length, this.config.clickIntervalMs / 1000);
+    if (indexed.length < 6) return false;
+    const res = indexed.map((c) => c.residual * 1000).sort((a, b) => a - b);
+    const med = res[Math.floor(res.length / 2)];
+    const dev = res.map((r) => Math.abs(r - med)).sort((a, b) => a - b);
+    const spread = 1.4826 * dev[Math.floor(dev.length / 2)];
+    return spread < 1 || (indexed.length >= 8 && spread < 2.5);
   }
 
   getLevel(): number {
@@ -249,7 +277,7 @@ export class CalibrationSession {
           isReference,
           confidence: this.confidence(room),
           detectedClicks: room.clicks,
-          totalClicks: WINDOW_S,
+          totalClicks: room.clicks,
           warnings: qualityWarnings(room),
         });
       }
@@ -433,7 +461,7 @@ export class CalibrationSession {
     this.stopDiagnostics = null;
     if (this.liveTimer) clearInterval(this.liveTimer);
     this.liveTimer = null;
-    if (this.windowTimer) clearTimeout(this.windowTimer);
+    if (this.windowTimer) clearInterval(this.windowTimer);
     this.windowTimer = null;
   }
 
