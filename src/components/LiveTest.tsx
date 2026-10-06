@@ -4,7 +4,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCalibrationStore, usePlayersStore } from '../store';
 import { analyzeGroups, otherGroupMembers } from '../calibration/grouping';
-import { LiveDriftSession, type LiveReading, type LiveStage } from '../calibration/LiveDriftSession';
+import {
+  LiveDriftSession,
+  type LiveLevels,
+  type LiveReading,
+  type LiveStage,
+  type VolumeNote,
+} from '../calibration/LiveDriftSession';
 import { PlayerList } from './PlayerList';
 import { MuteWarning } from './MuteWarning';
 import type { MuteProblem } from '../calibration/muting';
@@ -57,6 +63,11 @@ function Run({
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
   const [stageSince, setStageSince] = useState(Date.now());
+  const [levels, setLevels] = useState<LiveLevels | null>(null);
+  const [volumeNote, setVolumeNote] = useState<VolumeNote | null>(null);
+  const [keepVolumes, setKeepVolumes] = useState(false);
+  const [speed, setSpeed] = useState(12);
+  const [sensitivity, setSensitivity] = useState(12);
   const [, tick] = useState(0);
   const sessionRef = useRef<LiveDriftSession | null>(null);
 
@@ -68,9 +79,9 @@ function Run({
 
   useEffect(() => {
     const session = new LiveDriftSession(
-      { playerId: a.player_id, name: a.name, muted: a.volume_muted ?? a.muted },
-      { playerId: b.player_id, name: b.name, muted: b.volume_muted ?? b.muted },
-      others.map((p) => ({ playerId: p.player_id, name: p.name, muted: p.volume_muted ?? p.muted }))
+      { playerId: a.player_id, name: a.name, muted: a.volume_muted ?? a.muted, volume: a.volume_level },
+      { playerId: b.player_id, name: b.name, muted: b.volume_muted ?? b.muted, volume: b.volume_level },
+      others.map((p) => ({ playerId: p.player_id, name: p.name, muted: p.volume_muted ?? p.muted, volume: p.volume_level }))
     );
     sessionRef.current = session;
     void session.run((event) => {
@@ -78,11 +89,15 @@ function Run({
         setStage(event.data as LiveStage);
         setStageSince(Date.now());
       } else if (event.type === 'reading') {
-        setReadings((prev) => [...prev, event.data as LiveReading]);
+        setReadings((prev) => [...prev.slice(-1500), event.data as LiveReading]);
       } else if (event.type === 'mute_problems') {
         setMuteProblems(event.data as MuteProblem[]);
       } else if (event.type === 'level') {
         setLevel(event.data as number);
+      } else if (event.type === 'levels') {
+        setLevels(event.data as LiveLevels);
+      } else if (event.type === 'volume') {
+        setVolumeNote(event.data as VolumeNote);
       } else if (event.type === 'error') {
         setError(event.data as string);
       }
@@ -98,7 +113,11 @@ function Run({
   const last = readings[readings.length - 1];
   const locked = readings.filter((r) => r.locked);
   const first = locked[0];
-  const latest = last?.delayMs ?? null;
+  const lastGap = [...readings].reverse().find((r) => r.delayMs !== null);
+  // Keep showing the last gap for a few seconds if one reading misses it
+  const holding = last?.delayMs === null && lastGap !== undefined && last !== undefined && last.t - lastGap.t < 5;
+  const shown = holding ? lastGap : last;
+  const latest = shown?.delayMs ?? null;
 
   // What the click test said about this pair (if it has been run for both)
   const clickGap = (() => {
@@ -143,6 +162,12 @@ function Run({
               />
             </div>
           )}
+          {levels && learning && (
+            <p className="text-xs text-text-muted">
+              Level at the phone: {a.name} {levels.aDb.toFixed(0)} dB · {b.name} {levels.bDb.toFixed(0)} dB
+            </p>
+          )}
+          {volumeNote && learning && <p className="text-xs text-text-muted">{volumeNote.text}</p>}
           {stage === 'waiting' && (
             <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
               <div className="h-full bg-green-500" style={{ width: `${Math.min(100, level * 2000)}%`, transition: 'width 300ms' }} />
@@ -166,15 +191,21 @@ function Run({
             <>
               <p className="text-2xl font-bold text-text-muted">No gap found</p>
               <p className="text-xs text-text-muted">In sync (under 1.5 ms), music too quiet, or one speaker not heard.</p>
+              {last.candidates[0] && (
+                <p className="text-xs text-text-muted">
+                  Strongest candidate: {last.candidates[0].delayMs.toFixed(1)} ms (strength{' '}
+                  {last.candidates[0].strength.toFixed(0)}, needs {sensitivity})
+                </p>
+              )}
             </>
           ) : (
             <>
-              <p className={`text-5xl font-bold ${last.locked ? 'text-green-300' : 'text-yellow-300'}`}>
+              <p className={`text-5xl font-bold ${shown?.locked ? 'text-green-300' : 'text-yellow-300'}`}>
                 {latest.toFixed(1)} <span className="text-2xl">ms</span>
               </p>
               <p className="text-xs text-text-muted">
-                {last.locked ? 'steady' : 'measuring'} · strength {last.strength.toFixed(0)}
-                {!last.usedBaseline && ' · room not learned'}
+                {holding ? 'updating' : shown?.locked ? 'steady' : 'measuring'} · strength {shown?.strength.toFixed(0)}
+                {!shown?.usedBaseline && ' · room not learned'}
               </p>
             </>
           )}
@@ -185,6 +216,7 @@ function Run({
       )}
 
       {readings.length > 1 && <Chart readings={readings} />}
+      {last && <CurveChart reading={last} threshold={sensitivity} />}
 
       {change !== null && first && (
         <div className="grid grid-cols-3 gap-2 text-center text-sm">
@@ -204,7 +236,52 @@ function Run({
         </p>
       )}
 
+      {stage === 'live' && (
+        <div className="space-y-2 text-xs">
+          <Choice
+            label="Speed"
+            value={speed}
+            options={[[6, 'Fast'], [12, 'Normal'], [25, 'Steady']]}
+            onChange={(v) => {
+              setSpeed(v);
+              sessionRef.current?.setMemory(v);
+            }}
+          />
+          <Choice
+            label="Sensitivity"
+            value={sensitivity}
+            options={[[12, 'Normal'], [8, 'High'], [6, 'Max']]}
+            onChange={(v) => {
+              setSensitivity(v);
+              sessionRef.current?.setMinStrength(v);
+            }}
+          />
+          <label className="flex items-center gap-2 text-text-muted">
+            <input
+              type="checkbox"
+              checked={keepVolumes}
+              onChange={(e) => {
+                setKeepVolumes(e.target.checked);
+                sessionRef.current?.keepVolumes(e.target.checked);
+              }}
+            />
+            Keep the matched volumes when I stop
+          </label>
+          {volumeNote && <p className="text-text-muted">{volumeNote.text}</p>}
+        </div>
+      )}
+
       <div className="flex gap-3">
+        <button
+          onClick={() => {
+            sessionRef.current?.resetReadings();
+            setReadings([]);
+          }}
+          disabled={stage !== 'live'}
+          className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
+        >
+          Clear
+        </button>
         <button
           onClick={() => {
             sessionRef.current?.learnAgain();
@@ -213,7 +290,7 @@ function Run({
           disabled={stage !== 'live'}
           className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
         >
-          Learn room again
+          Relearn room
         </button>
         <button
           onClick={() => {
@@ -284,5 +361,61 @@ function Chart({ readings }: { readings: LiveReading[] }) {
           )
       )}
     </svg>
+  );
+}
+
+function Choice({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  options: [number, string][];
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-20 text-text-muted">{label}</span>
+      {options.map(([v, name]) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={`px-3 py-1 rounded ${value === v ? 'bg-primary' : 'bg-surface hover:bg-gray-700'}`}
+        >
+          {name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Strength of an echo at each delay, right now. A bump above the line is a candidate gap. */
+function CurveChart({ reading, threshold }: { reading: LiveReading; threshold: number }) {
+  const { startMs, endMs, values } = reading.curve;
+  const w = 340;
+  const h = 90;
+  const pad = { l: 28, r: 6, t: 6, b: 16 };
+  const maxV = Math.max(threshold * 1.6, ...values);
+  const x = (ms: number) => pad.l + ((ms - startMs) / (endMs - startMs)) * (w - pad.l - pad.r);
+  const y = (v: number) => pad.t + (1 - Math.max(0, v) / maxV) * (h - pad.t - pad.b);
+  const pts = values.map((v, i) => `${x(startMs + ((i + 0.5) / values.length) * (endMs - startMs)).toFixed(1)},${y(v).toFixed(1)}`);
+  return (
+    <div>
+      <div className="text-xs text-text-muted mb-1">Echo strength by gap (ms): bumps above the line are candidates</div>
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full bg-surface rounded-lg">
+        <line x1={pad.l} x2={w - pad.r} y1={y(threshold)} y2={y(threshold)} stroke="#f87171" strokeDasharray="3 3" strokeWidth="0.8" />
+        <polyline points={pts.join(' ')} fill="none" stroke="#60a5fa" strokeWidth="1.2" />
+        {[0, 50, 100, 150, 200, 250].map((ms) => (
+          <text key={ms} x={x(Math.max(ms, startMs))} y={h - 3} fontSize="8" fill="#9ca3af" textAnchor="middle">
+            {ms}
+          </text>
+        ))}
+        <text x={pad.l - 3} y={y(threshold) + 3} fontSize="8" fill="#f87171" textAnchor="end">
+          {threshold}
+        </text>
+      </svg>
+    </div>
   );
 }

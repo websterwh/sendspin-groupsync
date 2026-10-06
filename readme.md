@@ -2,7 +2,7 @@
 
 ## Live drift test (dev server only)
 
-`npm run dev` has a second tool on the home screen: **Live drift test**. Pick two speakers, play your own music (Spotify Connect, anything), and it shows the gap between them while the music plays, with a chart of how it changes. It learns the room first (about 40 s: only speaker A plays, then only B, using mute), then updates every 5 s.
+`npm run dev` has a second tool on the home screen: **Live drift test**. Pick two speakers, play your own music (Spotify Connect, anything), and it shows the gap between them while the music plays, with a chart of how it changes. It learns the room first (about 40 s: only speaker A plays, then only B, using mute) and matches the two speakers' volumes at the phone (restored when you stop unless you tick *Keep*), then updates about once a second. *Speed* sets how much recent audio counts (Fast reacts in a few seconds, Steady is smoother); *Clear* restarts the readings after you change a delay.
 
 - It reports the *size* of the gap, not which speaker is ahead. The click test gives the direction, and the live screen shows the last click-test value for the pair so you can compare.
 - It works best with busy music or speech. Put the phone between the speakers at about equal distance.

@@ -164,13 +164,29 @@ export async function computeLagCurve(
   }
   if (frames < 4) return null;
 
-  // Average whitened spectrum minus its expected value (1) = the comb ripple; back to the lag domain
-  for (let i = 0; i < N; i++) {
-    re[i] = 0;
-    im[i] = 0;
-  }
+  const avg = new Float64Array(N / 2 + 1);
+  for (let k = kLo; k <= kHi; k++) avg[k] = acc[k] / frames;
+  return lagCurveFromAverage(avg, N, sampleRate, kLo, kHi, minMs, maxMs, frames);
+}
+
+/**
+ * From the average whitened spectrum to the lag curve: the average minus its expected value (1) is the
+ * comb ripple, and its inverse transform has a peak at each echo delay.
+ */
+function lagCurveFromAverage(
+  avg: Float64Array,
+  N: number,
+  sampleRate: number,
+  kLo: number,
+  kHi: number,
+  minMs: number,
+  maxMs: number,
+  frames: number
+): LagCurve {
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
   for (let k = kLo; k <= kHi; k++) {
-    const d = acc[k] / frames - 1;
+    const d = avg[k] - 1;
     re[k] = d;
     re[N - k] = d;
   }
@@ -189,6 +205,118 @@ export async function computeLagCurve(
 
   const strength = Float64Array.from(curve, (v) => (v - median) / noise);
   return { strength, lagLo, sampleRate, frames };
+}
+
+/**
+ * Streaming version: feed audio as it arrives and read the current estimate at any time. Each new frame is
+ * added to a running average in which older frames fade out (memoryS is roughly how long they count), so a
+ * change in the gap shows up within a few seconds instead of after a whole fixed window.
+ */
+export class LagCurveTracker {
+  private readonly N: number;
+  private readonly hop: number;
+  private readonly sampleRate: number;
+  private readonly kLo: number;
+  private readonly kHi: number;
+  private readonly halfWin: number;
+  private readonly minMs: number;
+  private readonly maxMs: number;
+  private readonly hann: Float64Array;
+  private readonly re: Float64Array;
+  private readonly im: Float64Array;
+  private readonly power: Float64Array;
+  private readonly prefix: Float64Array;
+  private acc: Float64Array;
+  private weight = 0;
+  private buffer = new Float32Array(0);
+  private decay: number;
+  /** Frames folded into the running average since the last reset (not faded) */
+  frames = 0;
+
+  constructor(sampleRate: number, options: LiveDelayOptions & { memoryS?: number } = {}) {
+    this.sampleRate = sampleRate;
+    this.N = options.frameSize ?? 32768;
+    this.hop = Math.max(1, Math.round(this.N * (options.hopFraction ?? 0.5)));
+    this.minMs = options.minMs ?? 1.5;
+    this.maxMs = options.maxMs ?? 250;
+    const [loHz, hiHz] = options.bandHz ?? [300, 8000];
+    const binHz = sampleRate / this.N;
+    this.kLo = Math.max(1, Math.round(loHz / binHz));
+    this.kHi = Math.min(this.N / 2 - 1, Math.round(hiHz / binHz));
+    this.halfWin = Math.max(2, Math.round((options.smoothHz ?? 800) / binHz / 2));
+    this.hann = new Float64Array(this.N);
+    for (let i = 0; i < this.N; i++) this.hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / this.N));
+    this.re = new Float64Array(this.N);
+    this.im = new Float64Array(this.N);
+    this.power = new Float64Array(this.N / 2 + 1);
+    this.prefix = new Float64Array(this.N / 2 + 2);
+    this.acc = new Float64Array(this.N / 2 + 1);
+    this.decay = 1;
+    this.setMemory(options.memoryS ?? 15);
+  }
+
+  /** How long (seconds, roughly) audio keeps counting. Shorter reacts faster but is noisier. */
+  setMemory(memoryS: number): void {
+    this.decay = Math.exp(-(this.hop / this.sampleRate) / Math.max(1, memoryS / 2));
+  }
+
+  /** Forget everything heard so far */
+  reset(): void {
+    this.acc.fill(0);
+    this.weight = 0;
+    this.frames = 0;
+    this.buffer = new Float32Array(0);
+  }
+
+  /** Add newly recorded audio; returns how many frames it completed */
+  async push(samples: Float32Array): Promise<number> {
+    const merged = new Float32Array(this.buffer.length + samples.length);
+    merged.set(this.buffer, 0);
+    merged.set(samples, this.buffer.length);
+    this.buffer = merged;
+    let done = 0;
+    let offset = 0;
+    while (offset + this.N <= this.buffer.length) {
+      if (this.addFrame(offset)) done++;
+      offset += this.hop;
+    }
+    this.buffer = this.buffer.slice(offset);
+    return done;
+  }
+
+  private addFrame(offset: number): boolean {
+    const { N, re, im, power, prefix, hann } = this;
+    let energy = 0;
+    for (let i = 0; i < N; i++) {
+      const v = this.buffer[offset + i] * hann[i];
+      re[i] = v;
+      im[i] = 0;
+      energy += v * v;
+    }
+    if (energy < 1e-9) return false; // silence
+    fft(re, im);
+    for (let k = 0; k <= N / 2; k++) power[k] = re[k] * re[k] + im[k] * im[k];
+    prefix[0] = 0;
+    for (let k = 0; k <= N / 2; k++) prefix[k + 1] = prefix[k] + power[k];
+    const frame = new Float64Array(N / 2 + 1);
+    for (let k = this.kLo; k <= this.kHi; k++) {
+      const a = Math.max(0, k - this.halfWin);
+      const b = Math.min(N / 2, k + this.halfWin);
+      frame[k] = power[k] / ((prefix[b + 1] - prefix[a]) / (b - a + 1) + 1e-18);
+    }
+    for (let k = this.kLo; k <= this.kHi; k++) this.acc[k] = this.acc[k] * this.decay + frame[k];
+    this.weight = this.weight * this.decay + 1;
+    this.frames++;
+    return true;
+  }
+
+  /** The current lag curve, or null until enough audio has been heard */
+  curve(minFrames = 8): LagCurve | null {
+    if (this.frames < minFrames || this.weight <= 0) return null;
+    const avg = new Float64Array(this.N / 2 + 1);
+    for (let k = this.kLo; k <= this.kHi; k++) avg[k] = this.acc[k] / this.weight;
+    return lagCurveFromAverage(avg, this.N, this.sampleRate, this.kLo, this.kHi, this.minMs, this.maxMs, this.frames);
+  }
 }
 
 /** Local maxima of a strength curve, strongest first */
