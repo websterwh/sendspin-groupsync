@@ -118,6 +118,8 @@ const MUSIC_LEVEL = 0.002;
  * similar bumps at small delays. They are only reported as a number when the peak is strong and clearly
  * stands above everything else; otherwise the reading says "no clear gap" (in sync, or unclear).
  */
+// Lowering the louder speaker is a last resort: never below three quarters of where the user had it
+const LOWER_FLOOR = (orig: number) => Math.max(5, Math.round(orig * 0.75));
 const SMALL_GAP_MS = 10;
 const SMALL_GAP_MIN_STRENGTH = 20;
 const SMALL_GAP_CLEARANCE = 1.4;
@@ -468,7 +470,7 @@ export class LiveDriftSession {
       let newVol = Math.min(100, q.current + wantSteps, q.orig + MAX_STEPS);
       if (newVol <= q.current) {
         target = loud;
-        newVol = Math.max(0, l.current - wantSteps, l.orig - MAX_STEPS);
+        newVol = Math.max(LOWER_FLOOR(l.orig), l.current - wantSteps);
         if (newVol >= l.current) {
           note(`Couldn't match the volumes (${Math.abs(diffDb).toFixed(1)} dB apart; adjustment limit reached).`, true);
           return [eA, eB];
