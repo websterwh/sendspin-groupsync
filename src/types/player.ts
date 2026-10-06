@@ -8,6 +8,8 @@ export interface Player {
   type: string;
   available: boolean;
   powered: boolean;
+  playback_state?: string;
+  state?: string;
   volume_level: number;
   muted?: boolean;
   volume_muted?: boolean;

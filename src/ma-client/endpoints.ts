@@ -38,6 +38,7 @@ interface DevServerInfo {
   tokenSaved?: boolean;
   canSaveToken?: boolean;
   defaultServer?: string | null;
+  trackStats?: { requests: number; lastAgoS: number | null; lastIp: string };
 }
 
 export async function getDevServerInfo(serverUrl: string): Promise<DevServerInfo | null> {

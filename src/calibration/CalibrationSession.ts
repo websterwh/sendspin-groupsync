@@ -16,7 +16,7 @@ import { analyzeRooms, detectClicks, qualityWarnings, MAX_NORMAL_WIDTH_MS } from
 import type { DetectedClick, RoomAnalysis } from './ClickAnalyzer';
 import type { CalibrationConfig, CalibrationResult } from '../types';
 import { DEFAULT_CALIBRATION_CONFIG } from '../types';
-import { maClient, resolveClickTrackUrl } from '../ma-client';
+import { maClient, resolveClickTrackUrl, getDevServerInfo } from '../ma-client';
 
 export interface CalibrationRoom {
   playerId: string;
@@ -39,6 +39,16 @@ export type CalibrationEventType =
 export interface CalibrationEvent {
   type: CalibrationEventType;
   data?: unknown;
+}
+
+/** Why nothing may be audible yet: did MA fetch the track, and what does MA say the player is doing */
+export interface PlaybackDiagnostics {
+  /** Times Music Assistant requested the click track from this computer; null if unknown */
+  trackRequests: number | null;
+  lastRequestAgoS: number | null;
+  lastRequestIp: string;
+  playbackState: string | null;
+  playerName: string;
 }
 
 /** What was heard in one room, available right after it is measured */
@@ -83,6 +93,8 @@ export class CalibrationSession {
   private heardTimes = new Set<number>();
   private lastHeardCount = 0;
   private muteProblems = new Map<string, string>();
+  private diag: PlaybackDiagnostics | null = null;
+  private stopDiagnostics: (() => void) | null = null;
 
   private queueId: string;
   private rooms: CalibrationRoom[];
@@ -109,7 +121,7 @@ export class CalibrationSession {
    * room for startup, every room plus the closing check, and several retries.
    */
   get trackSeconds(): number {
-    return Math.min(600, 120 + (this.rooms.length + 1) * 75);
+    return Math.min(300, 100 + (this.rooms.length + 1) * 40);
   }
 
   get windowSeconds(): number {
@@ -356,6 +368,30 @@ export class CalibrationSession {
   /** Once a second, scan the last few seconds so the UI can show clicks arriving. */
   private startLiveDetection(): void {
     const startedAt = Date.now();
+    // While nothing has been heard, poll what MA and the track server report (no console on a phone)
+    const pollDiagnostics = async () => {
+      if (this.heardTimes.size > 0 || !this.isRunning) return;
+      const info = await getDevServerInfo(this.serverUrl);
+      let playbackState: string | null = null;
+      let playerName = this.queueId;
+      try {
+        const p = await maClient.getPlayer(this.queueId);
+        playbackState = p.playback_state ?? p.state ?? null;
+        playerName = p.name ?? this.queueId;
+      } catch {
+        // ignore
+      }
+      this.diag = {
+        trackRequests: info?.trackStats?.requests ?? null,
+        lastRequestAgoS: info?.trackStats?.lastAgoS ?? null,
+        lastRequestIp: info?.trackStats?.lastIp ?? '',
+        playbackState,
+        playerName,
+      };
+    };
+    const diagTimer = setInterval(() => void pollDiagnostics(), 3000);
+    const stopDiag = () => clearInterval(diagTimer);
+    this.stopDiagnostics = stopDiag;
     this.liveTimer = setInterval(() => {
       const end = this.recorder.elapsed;
       const from = Math.max(0, end - 6);
@@ -375,6 +411,7 @@ export class CalibrationSession {
           level: this.recorder.level,
           timedOut: this.heardTimes.size === 0 && waitedS > HEAR_TIMEOUT_S,
           remainingSeconds: this.remainingSeconds,
+          diagnostics: this.diag,
         },
       });
       this.lastHeardCount = this.heardTimes.size;
@@ -382,6 +419,8 @@ export class CalibrationSession {
   }
 
   private stopTimers(): void {
+    this.stopDiagnostics?.();
+    this.stopDiagnostics = null;
     if (this.liveTimer) clearInterval(this.liveTimer);
     this.liveTimer = null;
     if (this.windowTimer) clearTimeout(this.windowTimer);

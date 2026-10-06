@@ -29,6 +29,9 @@ const CLICK_AMPLITUDE = 0.8;
 
 const trackCache = new Map<number, Buffer>();
 
+/** What Music Assistant has requested from the click-track server (shown on the page while waiting) */
+const trackStats = { requests: 0, lastAt: 0, lastIp: '', lastRange: '' };
+
 /** Placeholder the page sends instead of the real token; swapped in by the proxy so the token never reaches the browser */
 const TOKEN_PLACEHOLDER = '__GROUPSYNC_ENV_TOKEN__';
 
@@ -252,6 +255,11 @@ export function groupSyncPlugin(): Plugin {
         tokenSaved: !!readSavedToken(rootDir),
         defaultServer: readEnvValue(rootDir, 'MA_URL'),
         canSaveToken: isLoopback(req),
+        trackStats: {
+          requests: trackStats.requests,
+          lastAgoS: trackStats.lastAt ? Math.round((Date.now() - trackStats.lastAt) / 1000) : null,
+          lastIp: trackStats.lastIp,
+        },
       })
     );
   };
@@ -265,6 +273,10 @@ export function groupSyncPlugin(): Plugin {
         res.end();
         return;
       }
+      trackStats.requests++;
+      trackStats.lastAt = Date.now();
+      trackStats.lastIp = (req.socket.remoteAddress ?? '').replace('::ffff:', '');
+      trackStats.lastRange = req.headers.range ?? '';
       const wanted = Number(reqUrl.searchParams.get('seconds')) || MAX_TRACK_SECONDS;
       const track = buildTrack(Math.min(MAX_TRACK_SECONDS, Math.max(30, Math.round(wanted))));
       res.setHeader('Content-Type', 'audio/wav');

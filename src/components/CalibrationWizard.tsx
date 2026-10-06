@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCalibrationStore, usePlayersStore, useConnectionStore } from '../store';
 import { createCalibrationSession, CalibrationSession } from '../calibration';
-import type { RoomReading, MeasurementKind } from '../calibration/CalibrationSession';
+import type { RoomReading, MeasurementKind, PlaybackDiagnostics } from '../calibration/CalibrationSession';
 import { analyzeGroups } from '../calibration/grouping';
 import { pushSyncOffsets } from '../sync-push';
 import type { PushResult } from '../sync-push';
@@ -39,6 +39,8 @@ export function CalibrationWizard() {
   const [measuringName, setMeasuringName] = useState('');
   const [live, setLive] = useState({ total: 0, level: 0, timedOut: false, remaining: 0 });
   const [playing, setPlaying] = useState(false);
+  const [waitedS, setWaitedS] = useState(0);
+  const [diagnostics, setDiagnostics] = useState<PlaybackDiagnostics | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [driftPpm, setDriftPpm] = useState<number | null>(null);
   const [audioGaps, setAudioGaps] = useState(0);
@@ -81,6 +83,8 @@ export function CalibrationWizard() {
     setMuteProblems([]);
     setClosingDone(false);
     setPlaying(false);
+    setWaitedS(0);
+    setDiagnostics(null);
     setLive({ total: 0, level: 0, timedOut: false, remaining: 0 });
     setPhase('listening');
 
@@ -98,8 +102,16 @@ export function CalibrationWizard() {
             setPlaying(true);
             break;
           case 'clicks_heard': {
-            const d = event.data as { total: number; level: number; timedOut: boolean; remainingSeconds: number };
+            const d = event.data as {
+              total: number;
+              level: number;
+              timedOut: boolean;
+              remainingSeconds: number;
+              diagnostics: PlaybackDiagnostics | null;
+            };
             setLive({ total: d.total, level: d.level, timedOut: d.timedOut, remaining: d.remainingSeconds });
+            setDiagnostics(d.diagnostics);
+            setWaitedS((w) => (d.total === 0 ? w + 1 : 0));
             break;
           }
           case 'room_measured': {
@@ -348,6 +360,33 @@ export function CalibrationWizard() {
                 : `Heard ${live.total} click${live.total === 1 ? '' : 's'} so far. ${Math.round(live.remaining)} s of track left.`}
             </p>
           </div>
+
+          {live.total === 0 && playing && waitedS >= 8 && (
+            <div className="p-3 bg-surface border border-gray-600 rounded-lg text-sm space-y-1">
+              <p className="font-medium">Still waiting ({waitedS} s). What&apos;s happening:</p>
+              {diagnostics === null ? (
+                <p className="text-text-muted">Checking...</p>
+              ) : (
+                <ul className="list-disc list-inside text-text-muted space-y-1">
+                  <li>
+                    {diagnostics.trackRequests === null
+                      ? 'Could not check whether Music Assistant fetched the click track (not running through the GroupSync dev server).'
+                      : diagnostics.trackRequests === 0
+                        ? 'Music Assistant has NOT requested the click track from this computer. It probably can\'t reach it: allow incoming connections for Node on port 5174 in your computer\'s firewall, and check MA and this computer are on the same network.'
+                        : `Music Assistant fetched the click track ${diagnostics.trackRequests} time(s)${diagnostics.lastRequestAgoS !== null ? `, last ${diagnostics.lastRequestAgoS} s ago` : ''}${diagnostics.lastRequestIp ? ` from ${diagnostics.lastRequestIp}` : ''}. So it is playing or about to; some players take 10-30 s to start.`}
+                  </li>
+                  <li>
+                    {diagnostics.playbackState
+                      ? `${diagnostics.playerName} is "${diagnostics.playbackState}" in Music Assistant.`
+                      : `Music Assistant doesn't report a playback state for ${diagnostics.playerName}.`}
+                  </li>
+                  {diagnostics.trackRequests !== null && diagnostics.trackRequests > 0 && (
+                    <li>If it says playing but you hear nothing: check the volume and that nothing in the group is muted.</li>
+                  )}
+                </ul>
+              )}
+            </div>
+          )}
 
           {live.timedOut && (
             <div className="p-3 bg-red-900/20 border border-red-700/50 rounded-lg text-red-300 text-sm">
