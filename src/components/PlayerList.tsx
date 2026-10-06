@@ -1,9 +1,17 @@
-import { usePlayersStore, useCalibrationStore, useConnectionStore } from '../store';
+import { usePlayersStore, useCalibrationStore } from '../store';
 import { useState } from 'react';
 import { maClient } from '../ma-client';
 
-export function PlayerList() {
-  const { players, setPlayers, selectedPlayerIds, togglePlayerSelection, loading, reset: resetPlayers } = usePlayersStore();
+interface Props {
+  /** 'click' picks any number of speakers; 'live' picks exactly two */
+  variant?: 'click' | 'live';
+  onBack: () => void;
+  /** Called by the Start button (default: open the click-test instructions) */
+  onStart?: () => void;
+}
+
+export function PlayerList({ variant = 'click', onBack, onStart }: Props) {
+  const { players, setPlayers, selectedPlayerIds, togglePlayerSelection, setSelection, loading } = usePlayersStore();
   const [cleaning, setCleaning] = useState(false);
   // Leftovers from older GroupSync versions that registered a Sendspin player on every run
   const ghostPlayers = players.filter((p) => p.name === 'GroupSync');
@@ -25,18 +33,22 @@ export function PlayerList() {
     }
   };
   const { setPhase } = useCalibrationStore();
-  const { reset: resetConnection } = useConnectionStore();
+  const live = variant === 'live';
+  const canStart = live ? selectedPlayerIds.length === 2 : selectedPlayerIds.length > 0;
 
-  const handleStartCalibration = () => {
-    if (selectedPlayerIds.length > 0) {
-      setPhase('instructions');
-    }
+  const handleStart = () => {
+    if (!canStart) return;
+    if (onStart) onStart();
+    else setPhase('instructions');
   };
 
-  const handleDisconnect = () => {
-    maClient.disconnect();
-    resetConnection();
-    resetPlayers();
+  // The live test compares exactly two speakers: picking a third replaces the oldest pick
+  const handleToggle = (id: string) => {
+    if (live && !selectedPlayerIds.includes(id) && selectedPlayerIds.length >= 2) {
+      setSelection([selectedPlayerIds[1], id]);
+    } else {
+      togglePlayerSelection(id);
+    }
   };
 
   const noPlayersFound = players.length === 0 && !loading;
@@ -44,8 +56,12 @@ export function PlayerList() {
   return (
     <div className="space-y-6 pb-24">
       <div>
-        <h2 className="text-2xl font-bold">Speakers</h2>
-        <p className="text-text-muted text-sm">Pick the speakers to compare. They need to share a sync group in Music Assistant.</p>
+        <h2 className="text-2xl font-bold">{live ? 'Pick two speakers' : 'Speakers'}</h2>
+        <p className="text-text-muted text-sm">
+          {live
+            ? 'They need to share a sync group in Music Assistant.'
+            : 'Pick the speakers to compare. They need to share a sync group in Music Assistant.'}
+        </p>
       </div>
 
       {loading ? (
@@ -88,7 +104,7 @@ export function PlayerList() {
                   key={player.player_id}
                   onClick={() => {
                     console.log('[UI] Tapped player:', player.player_id, player.name);
-                    togglePlayerSelection(player.player_id);
+                    handleToggle(player.player_id);
                   }}
                   disabled={!isAvailable}
                   className={`w-full flex items-center gap-3 p-4 rounded-lg border transition-colors touch-manipulation
@@ -128,18 +144,18 @@ export function PlayerList() {
       <div className="fixed bottom-0 left-0 right-0 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] bg-background border-t border-gray-700">
         <div className="max-w-lg mx-auto flex gap-3">
           <button
-            onClick={handleDisconnect}
+            onClick={onBack}
             className="px-4 py-3 bg-surface hover:bg-gray-700 rounded-lg font-medium transition-colors"
           >
-            Disconnect
+            Back
           </button>
           <button
-            onClick={handleStartCalibration}
-            disabled={selectedPlayerIds.length === 0}
+            onClick={handleStart}
+            disabled={!canStart}
             className="flex-1 py-3 px-4 bg-primary hover:bg-primary-dark disabled:opacity-50
                        rounded-lg font-medium transition-colors"
           >
-            Start Calibration ({selectedPlayerIds.length})
+            {live ? `Next (${selectedPlayerIds.length}/2)` : `Start (${selectedPlayerIds.length})`}
           </button>
         </div>
       </div>

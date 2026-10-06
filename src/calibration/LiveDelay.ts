@@ -58,12 +58,25 @@ export interface LiveDelayOptions {
   bandHz?: [number, number];
   /** Width of the smoothing used for whitening */
   smoothHz?: number;
+  /** Frames advance by this fraction of the frame length (1 = no overlap) */
+  hopFraction?: number;
+  /** Called every few frames; await it to let the UI breathe during a long estimate */
+  yieldToUi?: () => Promise<void>;
 }
 
 export interface DelayPeak {
   delayMs: number;
   /** Peak height relative to the noise in the lag curve */
   strength: number;
+}
+
+/** The lag curve behind an estimate: strength (in noise units) of an echo at each lag */
+export interface LagCurve {
+  /** Strength per lag, starting at lagLo samples */
+  strength: Float64Array;
+  lagLo: number;
+  sampleRate: number;
+  frames: number;
 }
 
 export interface LiveDelayResult {
@@ -73,13 +86,17 @@ export interface LiveDelayResult {
   frames: number;
 }
 
-export function estimateDelay(samples: Float32Array, sampleRate: number, options: LiveDelayOptions = {}): LiveDelayResult {
+export async function computeLagCurve(
+  samples: Float32Array,
+  sampleRate: number,
+  options: LiveDelayOptions = {}
+): Promise<LagCurve | null> {
   const N = options.frameSize ?? 32768;
-  const minMs = options.minMs ?? 2;
+  const minMs = options.minMs ?? 1.5;
   const maxMs = options.maxMs ?? 250;
   const [loHz, hiHz] = options.bandHz ?? [300, 8000];
-  const smoothHz = options.smoothHz ?? 600;
-  const hop = N / 2;
+  const smoothHz = options.smoothHz ?? 800;
+  const hop = Math.max(1, Math.round(N * (options.hopFraction ?? 1)));
   const binHz = sampleRate / N;
   const kLo = Math.max(1, Math.round(loHz / binHz));
   const kHi = Math.min(N / 2 - 1, Math.round(hiHz / binHz));
@@ -95,17 +112,7 @@ export function estimateDelay(samples: Float32Array, sampleRate: number, options
   const prefix = new Float64Array(N / 2 + 2);
   let frames = 0;
 
-  for (let start = 0; start + N <= samples.length; start += hop) {
-    let energy = 0;
-    for (let i = 0; i < N; i++) {
-      const v = samples[start + i] * hann[i];
-      re[i] = v;
-      im[i] = 0;
-      energy += v * v;
-    }
-    if (energy < 1e-9) continue; // silence
-    fft(re, im);
-    for (let k = 0; k <= N / 2; k++) power[k] = re[k] * re[k] + im[k] * im[k];
+  const accumulate = () => {
     prefix[0] = 0;
     for (let k = 0; k <= N / 2; k++) prefix[k + 1] = prefix[k] + power[k];
     for (let k = kLo; k <= kHi; k++) {
@@ -115,8 +122,47 @@ export function estimateDelay(samples: Float32Array, sampleRate: number, options
       acc[k] += power[k] / (smooth + 1e-18);
     }
     frames++;
+  };
+
+  // Two real frames share one complex FFT (one in the real part, one in the imaginary part)
+  const starts: number[] = [];
+  for (let start = 0; start + N <= samples.length; start += hop) starts.push(start);
+  for (let f = 0; f < starts.length; f += 2) {
+    const s1 = starts[f];
+    const s2 = f + 1 < starts.length ? starts[f + 1] : -1;
+    let e1 = 0;
+    let e2 = 0;
+    for (let i = 0; i < N; i++) {
+      const v1 = samples[s1 + i] * hann[i];
+      const v2 = s2 >= 0 ? samples[s2 + i] * hann[i] : 0;
+      re[i] = v1;
+      im[i] = v2;
+      e1 += v1 * v1;
+      e2 += v2 * v2;
+    }
+    fft(re, im);
+    // Separate the two spectra: X1 = (Z[k] + conj(Z[N-k])) / 2, X2 = (Z[k] - conj(Z[N-k])) / 2j
+    if (e1 >= 1e-9) {
+      for (let k = 0; k <= N / 2; k++) {
+        const nk = (N - k) % N;
+        const xr = 0.5 * (re[k] + re[nk]);
+        const xi = 0.5 * (im[k] - im[nk]);
+        power[k] = xr * xr + xi * xi;
+      }
+      accumulate();
+    }
+    if (s2 >= 0 && e2 >= 1e-9) {
+      for (let k = 0; k <= N / 2; k++) {
+        const nk = (N - k) % N;
+        const xr = 0.5 * (im[k] + im[nk]);
+        const xi = -0.5 * (re[k] - re[nk]);
+        power[k] = xr * xr + xi * xi;
+      }
+      accumulate();
+    }
+    if (options.yieldToUi && (f / 2) % 6 === 5) await options.yieldToUi();
   }
-  if (frames < 4) return { best: null, peaks: [], frames };
+  if (frames < 4) return null;
 
   // Average whitened spectrum minus its expected value (1) = the comb ripple; back to the lag domain
   for (let i = 0; i < N; i++) {
@@ -141,23 +187,66 @@ export function estimateDelay(samples: Float32Array, sampleRate: number, options
   const dev = Float64Array.from(curve, (v) => Math.abs(v - median)).sort();
   const noise = Math.max(1.4826 * dev[Math.floor(dev.length / 2)], 1e-12);
 
-  const peaks: DelayPeak[] = [];
+  const strength = Float64Array.from(curve, (v) => (v - median) / noise);
+  return { strength, lagLo, sampleRate, frames };
+}
+
+/** Local maxima of a strength curve, strongest first */
+export function findPeaks(curve: LagCurve, minStrength = 0): DelayPeak[] {
+  const { strength, lagLo, sampleRate } = curve;
   const guard = Math.max(2, Math.round(0.0005 * sampleRate)); // local-maximum neighbourhood, 0.5 ms
-  for (let i = guard; i < curve.length - guard; i++) {
-    let isMax = curve[i] > 0;
-    for (let j = 1; isMax && j <= guard; j++) if (curve[i - j] >= curve[i] || curve[i + j] > curve[i]) isMax = false;
+  const peaks: DelayPeak[] = [];
+  for (let i = guard; i < strength.length - guard; i++) {
+    if (strength[i] <= minStrength) continue;
+    let isMax = true;
+    for (let j = 1; isMax && j <= guard; j++) if (strength[i - j] >= strength[i] || strength[i + j] > strength[i]) isMax = false;
     if (!isMax) continue;
-    const y0 = curve[i - 1];
-    const y1 = curve[i];
-    const y2 = curve[i + 1];
+    const y0 = strength[i - 1];
+    const y1 = strength[i];
+    const y2 = strength[i + 1];
     const denom = y0 - 2 * y1 + y2;
     const frac = denom < 0 ? Math.max(-1, Math.min(1, (0.5 * (y0 - y2)) / denom)) : 0;
-    peaks.push({
-      delayMs: (((i + lagLo + frac) / sampleRate) * 1000),
-      strength: (y1 - median) / noise,
-    });
+    peaks.push({ delayMs: ((i + lagLo + frac) / sampleRate) * 1000, strength: y1 });
   }
-  peaks.sort((a, b) => b.strength - a.strength);
-  const best = peaks.length > 0 && peaks[0].strength >= 5 ? peaks[0] : null;
-  return { best, peaks: peaks.slice(0, 5), frames };
+  return peaks.sort((a, b) => b.strength - a.strength);
+}
+
+/**
+ * Remove what the room does to each speaker on its own. `baselines` are curves recorded with only one
+ * speaker playing; a reflection shows up in those too. In the mix each speaker supplies only its share of
+ * the power, so each baseline is scaled by that share (`weights`, summing to 1) before it is subtracted
+ * (with a little give for small shifts). What is left is the echo that only exists when both play.
+ */
+export function subtractBaselines(mix: LagCurve, baselines: LagCurve[], weights: number[], toleranceMs = 0.4): LagCurve {
+  const tol = Math.max(1, Math.round((toleranceMs / 1000) * mix.sampleRate));
+  const out = new Float64Array(mix.strength.length);
+  for (let i = 0; i < out.length; i++) {
+    let base = 0;
+    baselines.forEach((b, n) => {
+      if (b.lagLo !== mix.lagLo || b.sampleRate !== mix.sampleRate) return;
+      let peak = 0;
+      for (let j = Math.max(0, i - tol); j <= Math.min(b.strength.length - 1, i + tol); j++) peak = Math.max(peak, b.strength[j]);
+      base += (weights[n] ?? 1 / baselines.length) * peak;
+    });
+    out[i] = mix.strength[i] - base;
+  }
+  return { ...mix, strength: out };
+}
+
+/** Pick the gap from a curve; null if nothing stands out */
+export function bestPeak(curve: LagCurve, minStrength = 8): { best: DelayPeak | null; peaks: DelayPeak[] } {
+  const peaks = findPeaks(curve, 0).slice(0, 5);
+  const best = peaks.length > 0 && peaks[0].strength >= minStrength ? peaks[0] : null;
+  return { best, peaks };
+}
+
+/** One-shot estimate with no baseline (reflections and the music's own pitch can show up as false gaps) */
+export async function estimateDelay(
+  samples: Float32Array,
+  sampleRate: number,
+  options: LiveDelayOptions = {}
+): Promise<LiveDelayResult> {
+  const curve = await computeLagCurve(samples, sampleRate, options);
+  if (!curve) return { best: null, peaks: [], frames: 0 };
+  return { ...bestPeak(curve), frames: curve.frames };
 }

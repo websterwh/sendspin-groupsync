@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useConnectionStore, usePlayersStore } from '../store';
+import { useEffect, useRef, useState } from 'react';
+import { useConnectionStore, usePlayersStore, useAppStore } from '../store';
 import { maClient, saveTokenToEnv, getDevServerInfo, saveServerToEnv, diagnoseConnection } from '../ma-client';
 import type { DiagnosticStep } from '../ma-client';
 
@@ -14,6 +14,8 @@ export function ConnectionPanel() {
     error,
     recentServers,
     addRecentServer,
+    autoConnectOff,
+    setAutoConnectOff,
   } = useConnectionStore();
   const { setPlayers, setLoading } = usePlayersStore();
   const [inputUrl, setInputUrl] = useState(serverUrl || '');
@@ -23,9 +25,39 @@ export function ConnectionPanel() {
   const [authenticating, setAuthenticating] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
   const [saveToEnv, setSaveToEnv] = useState(false);
+  const [autoConnecting, setAutoConnecting] = useState(false);
+  const triedAuto = useRef(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticStep[] | null>(null);
   const [diagnosing, setDiagnosing] = useState(false);
   const [canSaveToEnv, setCanSaveToEnv] = useState(false);
+
+  // Not the first launch: if the address and a token are already saved, connect without asking
+  useEffect(() => {
+    if (triedAuto.current || autoConnectOff) return;
+    triedAuto.current = true;
+    (async () => {
+      const info = await getDevServerInfo(serverUrl);
+      const url = (serverUrl || info?.defaultServer || '').trim();
+      if (!url) return;
+      let hasToken = false;
+      try {
+        hasToken = !!localStorage.getItem('ma_access_token');
+      } catch {
+        // ignore
+      }
+      if (!hasToken && !info?.tokenSaved) {
+        setInputUrl(url);
+        return;
+      }
+      setAutoConnecting(true);
+      try {
+        await handleConnect(url);
+      } finally {
+        setAutoConnecting(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Pre-fill the address saved on the dev-server machine (so a phone doesn't need it typed)
   useEffect(() => {
@@ -64,8 +96,9 @@ export function ConnectionPanel() {
     }
   };
 
-  const handleConnect = async () => {
-    if (!inputUrl.trim()) return;
+  const handleConnect = async (urlOverride?: string) => {
+    const target = (urlOverride ?? inputUrl).trim();
+    if (!target) return;
 
     setConnecting(true);
     setError(null);
@@ -74,12 +107,12 @@ export function ConnectionPanel() {
 
     try {
       // Connect to Music Assistant
-      await maClient.connect(inputUrl.trim());
+      await maClient.connect(target);
 
       // Save URLs
-      setServerUrl(inputUrl.trim());
-      addRecentServer(inputUrl.trim());
-      void saveServerToEnv(inputUrl.trim());
+      setServerUrl(target);
+      addRecentServer(target);
+      void saveServerToEnv(target);
 
       // Token saved in .env.local on the dev-server machine (never sent to the browser)
       const authedFromEnv = await maClient.authenticateWithServerToken();
@@ -99,6 +132,8 @@ export function ConnectionPanel() {
       // Try to fetch players - this will detect if auth is actually required
       const success = await fetchPlayers();
       if (success) {
+        setAutoConnectOff(false);
+        useAppStore.getState().setScreen('home');
         setConnected(true);
       }
       // If fetchPlayers failed due to auth, needsAuth is already set
@@ -109,7 +144,7 @@ export function ConnectionPanel() {
       console.error('[MA] Connection error:', err);
       // No console on a phone: say which hop is failing
       setDiagnosing(true);
-      diagnoseConnection(inputUrl.trim())
+      diagnoseConnection(target)
         .then(setDiagnostics)
         .finally(() => setDiagnosing(false));
     } finally {
@@ -175,6 +210,15 @@ export function ConnectionPanel() {
       }
     }
   };
+
+  if (autoConnecting && !needsAuth) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-16 text-text-muted">
+        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        <p>Connecting…</p>
+      </div>
+    );
+  }
 
   // Show login form if authentication is required
   if (needsAuth) {
@@ -347,7 +391,7 @@ export function ConnectionPanel() {
         )}
 
         <button
-          onClick={handleConnect}
+          onClick={() => handleConnect()}
           disabled={connecting || !inputUrl.trim()}
           className="w-full py-3 px-4 bg-primary hover:bg-primary-dark disabled:opacity-50
                      rounded-lg font-medium transition-colors flex items-center justify-center gap-2"

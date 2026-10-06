@@ -1,5 +1,13 @@
 # GroupSync
 
+## Live drift test (dev server only)
+
+`npm run dev` has a second tool on the home screen: **Live drift test**. Pick two speakers, play your own music (Spotify Connect, anything), and it shows the gap between them while the music plays, with a chart of how it changes. It learns the room first (about 40 s: only speaker A plays, then only B, using mute), then updates every 5 s.
+
+- It reports the *size* of the gap, not which speaker is ahead. The click test gives the direction, and the live screen shows the last click-test value for the pair so you can compare.
+- It works best with busy music or speech. Put the phone between the speakers at about equal distance.
+- It is not included in production builds or the Home Assistant app.
+
 ## Home Assistant app (add-on)
 
 Run GroupSync inside Home Assistant and open it from the HA app's sidebar (no computer needed).

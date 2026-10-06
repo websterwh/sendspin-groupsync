@@ -1,11 +1,17 @@
-import { useConnectionStore, useCalibrationStore } from './store';
+import { lazy, Suspense } from 'react';
+import { useConnectionStore, useCalibrationStore, useAppStore } from './store';
 import { ConnectionPanel } from './components/ConnectionPanel';
+import { Home } from './components/Home';
 import { PlayerList } from './components/PlayerList';
 import { CalibrationWizard } from './components/CalibrationWizard';
+
+// Dev-only tool: not part of production builds (and so not in the Home Assistant add-on)
+const LiveTest = import.meta.env.DEV ? lazy(() => import('./components/LiveTest')) : null;
 
 function App() {
   const { connected } = useConnectionStore();
   const { phase } = useCalibrationStore();
+  const { screen, setScreen } = useAppStore();
 
   return (
     <div className="min-h-screen bg-background text-text">
@@ -26,13 +32,18 @@ function App() {
       <main className="max-w-lg mx-auto p-4">
         {!connected ? (
           <ConnectionPanel />
+        ) : screen === 'home' ? (
+          <Home />
+        ) : screen === 'live' && LiveTest ? (
+          <Suspense fallback={<p className="text-text-muted">Loading…</p>}>
+            <LiveTest onBack={() => setScreen('home')} />
+          </Suspense>
         ) : phase === 'idle' || phase === 'selecting' ? (
-          <PlayerList />
+          <PlayerList onBack={() => setScreen('home')} />
         ) : (
           <CalibrationWizard />
         )}
       </main>
-
     </div>
   );
 }
