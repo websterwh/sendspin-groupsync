@@ -13,7 +13,15 @@
  */
 
 import { MicRecorder } from './MicRecorder';
-import { computeLagCurve, LagCurveTracker, subtractBaselines, bestPeak, type DelayPeak, type LagCurve } from './LiveDelay';
+import {
+  LagCurveTracker,
+  curveCorrelation,
+  maxStrength,
+  subtractBaselines,
+  bestPeak,
+  type DelayPeak,
+  type LagCurve,
+} from './LiveDelay';
 import { MuteController } from './muting';
 import { maClient } from '../ma-client';
 
@@ -43,18 +51,18 @@ export interface LiveReading {
   /** Strongest candidates whether or not they passed the threshold */
   candidates: DelayPeak[];
   /** The gap curve behind this reading (strength per delay), coarsely sampled for display */
-  curve: { startMs: number; endMs: number; values: number[] };
+  curve: { startMs: number; endMs: number; values: number[]; raw: number[] };
 }
 
-export type LiveEventType = 'stage' | 'reading' | 'mute_problems' | 'level' | 'levels' | 'volume' | 'error';
+export type LiveEventType = 'stage' | 'reading' | 'mute_problems' | 'level' | 'levels' | 'volume' | 'learn' | 'error';
 export interface LiveEvent {
   type: LiveEventType;
   data?: unknown;
 }
 
 export interface LiveOptions {
-  /** Seconds of audio learned per speaker */
-  baselineS?: number;
+  /** The longest to keep listening to one speaker while learning the room (it stops sooner once the picture is stable) */
+  learnMaxS?: number;
   /** Roughly how many seconds of recent audio count towards a reading (shorter = faster, noisier) */
   memoryS?: number;
   /** Seconds between readings */
@@ -73,6 +81,17 @@ export interface LiveLevels {
   bDb: number;
 }
 
+/** How the room learning is going for one speaker */
+export interface LearnProgress {
+  speaker: 'A' | 'B';
+  /** Seconds listened so far */
+  seconds: number;
+  /** How well two independent halves of the audio agree on the echo pattern (0 to 1) */
+  agreement: number;
+  /** listening: still going; stable/flat: understood; loose: gave up waiting for a clean picture; failed: not enough music */
+  state: 'listening' | 'stable' | 'flat' | 'loose' | 'failed';
+}
+
 export interface VolumeNote {
   text: string;
   /** Matching is finished (successfully or not) */
@@ -89,6 +108,8 @@ export interface RecorderLike {
   getSamples(fromS: number, toS: number): Float32Array;
 }
 
+/** Two independent halves of the audio must agree at least this well on the room's echo pattern */
+export const LEARN_AGREEMENT = 0.7;
 const MUSIC_LEVEL = 0.002;
 /** Portion of a speaker's echo pattern that remains in the mix once both play (they share the power) */
 const BASELINE_SHARE = 0.5;
@@ -135,8 +156,8 @@ export class LiveDriftSession {
     );
     this.recorder = recorder;
     this.opts = {
-      baselineS: options.baselineS ?? 20,
-      memoryS: options.memoryS ?? 12,
+      learnMaxS: options.learnMaxS ?? 45,
+      memoryS: options.memoryS ?? 20,
       readingEveryS: options.readingEveryS ?? 1,
       guardS: options.guardS ?? 2.5,
       minStrength: options.minStrength ?? 12,
@@ -220,34 +241,103 @@ export class LiveDriftSession {
   }
 
   private async learnRoom(): Promise<void> {
-    const { baselineS, guardS } = this.opts;
     this.curveA = this.curveB = null;
 
     this.setStage('learn_a');
     const failA = await this.setMutes([this.b, ...this.others]);
-    const a = await this.record(guardS, baselineS);
+    const a = await this.learnSpeaker('A');
     if (!a || !this.running || this.skipBaseline) return;
-    const curveA = await computeLagCurve(a, this.recorder.sampleRate, { yieldToUi });
 
     this.setStage('learn_b');
     const failB = await this.setMutes([this.a, ...this.others]);
-    const b = await this.record(guardS, baselineS);
+    const b = await this.learnSpeaker('B');
     if (!b || !this.running || this.skipBaseline) return;
-    const curveB = await computeLagCurve(b, this.recorder.sampleRate, { yieldToUi });
 
     // If a speaker that should have been silent was still playing, its "alone" recording contains the
     // gap itself, and subtracting it would hide the real gap. Better to run without the correction.
-    if (failA.length > 0 || failB.length > 0) return;
+    if (failA.length > 0 || failB.length > 0 || !a.curve || !b.curve) return;
 
-    this.curveA = curveA;
-    this.curveB = curveB;
-    let eA = energy(a);
-    let eB = energy(b);
+    this.curveA = a.curve;
+    this.curveB = b.curve;
+    let eA = a.energy;
+    let eB = b.energy;
     this.emit({ type: 'levels', data: { aDb: 10 * Math.log10(eA + 1e-12), bDb: 10 * Math.log10(eB + 1e-12) } satisfies LiveLevels });
     if (this.opts.matchVolume && !this.skipBaseline) {
       [eA, eB] = await this.matchVolumes(eA, eB);
     }
     this.weights = [(BASELINE_SHARE * eA) / (eA + eB || 1), (BASELINE_SHARE * eB) / (eA + eB || 1)];
+  }
+
+  /**
+   * Listen to one speaker alone until its room echo pattern is understood. Alternate 2 s blocks feed two
+   * independent estimates; when they agree the pattern is stable, and when both are flat there is nothing
+   * to learn. Otherwise keep listening, up to learnMaxS, and say so if it never settles.
+   */
+  private async learnSpeaker(speaker: 'A' | 'B'): Promise<{ curve: LagCurve | null; energy: number } | null> {
+    const sr = this.recorder.sampleRate;
+    const onSample = (t: number) => Math.floor(t * sr) / sr;
+    const BLOCK_S = 2;
+    const full = new LagCurveTracker(sr, { memoryS: 1e6 });
+    const halves = [new LagCurveTracker(sr, { memoryS: 1e6 }), new LagCurveTracker(sr, { memoryS: 1e6 })];
+    const start = onSample(this.recorder.elapsed + this.opts.guardS);
+    let processed = start;
+    let sumSq = 0;
+    let count = 0;
+    let lastCheck = 0;
+    let agreement = 0;
+    const began = Date.now();
+    const emitProgress = (state: LearnProgress['state']) =>
+      this.emit({
+        type: 'learn',
+        data: { speaker, seconds: (Date.now() - began) / 1000, agreement: Math.max(0, agreement), state } satisfies LearnProgress,
+      });
+
+    while (this.running && !this.skipBaseline) {
+      await sleep(500);
+      this.emit({ type: 'level', data: this.recorder.level });
+      const now = onSample(this.recorder.elapsed);
+      if (now - processed >= 0.25) {
+        // Split on block boundaries so each half only ever sees whole blocks
+        let from = processed;
+        while (from < now) {
+          const blockIndex = Math.floor((from - start) / BLOCK_S);
+          const blockEnd = Math.min(now, onSample(start + (blockIndex + 1) * BLOCK_S));
+          if (blockEnd <= from) break;
+          const chunk = this.recorder.getSamples(from, blockEnd);
+          for (let i = 0; i < chunk.length; i++) sumSq += chunk[i] * chunk[i];
+          count += chunk.length;
+          await full.push(chunk);
+          await halves[blockIndex % 2].push(chunk);
+          if (blockEnd >= onSample(start + (blockIndex + 1) * BLOCK_S)) halves[blockIndex % 2].endBlock();
+          from = blockEnd;
+        }
+        processed = now;
+      }
+
+      if (now - lastCheck >= 1) {
+        lastCheck = now;
+        const f = full.curve(14);
+        const h0 = halves[0].curve(6);
+        const h1 = halves[1].curve(6);
+        if (f && h0 && h1) {
+          agreement = curveCorrelation(h0.strength, h1.strength);
+          const flat = full.frames >= 24 && maxStrength(f) < 6.5 && maxStrength(h0) < 8 && maxStrength(h1) < 8;
+          if (agreement >= LEARN_AGREEMENT || flat) {
+            emitProgress(flat && agreement < LEARN_AGREEMENT ? 'flat' : 'stable');
+            return { curve: f, energy: count ? sumSq / count : 0 };
+          }
+        }
+        emitProgress('listening');
+      }
+
+      if ((Date.now() - began) / 1000 >= this.opts.learnMaxS) {
+        // Never settled: use what we have if there was enough audio, otherwise give up on correcting
+        const f = full.curve(14);
+        emitProgress(f ? 'loose' : 'failed');
+        return { curve: f, energy: count ? sumSq / count : 0 };
+      }
+    }
+    return null;
   }
 
   private async liveLoop(): Promise<void> {
@@ -290,9 +380,11 @@ export class LiveDriftSession {
       const lagMs = (i: number) => ((curve.lagLo + i) / curve.sampleRate) * 1000;
       const bins = 200;
       const values = new Array<number>(bins).fill(0);
+      const raw = new Array<number>(bins).fill(0);
       for (let i = 0; i < curve.strength.length; i++) {
         const bin = Math.min(bins - 1, Math.floor((i / curve.strength.length) * bins));
         values[bin] = Math.max(values[bin], curve.strength[i]);
+        raw[bin] = Math.max(raw[bin], mix.strength[i]);
       }
       const delayMs = best?.delayMs ?? null;
       // Steady: the last four readings agree within 0.5 ms (or 3%)
@@ -309,7 +401,7 @@ export class LiveDriftSession {
           locked,
           usedBaseline: !!learned,
           candidates: peaks.slice(0, 3),
-          curve: { startMs: lagMs(0), endMs: lagMs(curve.strength.length - 1), values },
+          curve: { startMs: lagMs(0), endMs: lagMs(curve.strength.length - 1), values, raw },
         } satisfies LiveReading,
       });
     }
@@ -365,9 +457,8 @@ export class LiveDriftSession {
       // Listen to the adjusted speaker alone to see what the change did
       const others = [this.a, this.b, ...this.others].filter((r) => r.playerId !== target.playerId);
       await this.setMutes(others);
-      const samples = await this.record(this.opts.guardS, 8);
-      if (!samples || !this.running) return [eA, eB];
-      const eNew = energy(samples);
+      const eNew = await this.listenForLevel();
+      if (eNew === null || !this.running) return [eA, eB];
       const oldE = target.playerId === this.a.playerId ? eA : eB;
       const changeDb = 10 * Math.log10((eNew + 1e-12) / (oldE + 1e-12));
       if (target.playerId === this.a.playerId) eA = eNew;
@@ -449,14 +540,28 @@ export class LiveDriftSession {
     );
   }
 
-  /** Record `seconds` of audio after a settling time; null if cancelled */
-  private async record(guardS: number, seconds: number): Promise<Float32Array | null> {
-    const start = this.recorder.elapsed + guardS;
-    while (this.running && !this.skipBaseline && this.recorder.elapsed < start + seconds) {
+  /** Listen until the level settles (two 1 s readings within 0.7 dB), 4 to 12 s; null if cancelled */
+  private async listenForLevel(): Promise<number | null> {
+    const start = this.recorder.elapsed + this.opts.guardS;
+    const blocks: number[] = [];
+    let next = start + 1;
+    while (this.running && !this.skipBaseline) {
       await sleep(500);
       this.emit({ type: 'level', data: this.recorder.level });
+      const now = this.recorder.elapsed;
+      if (now < next) continue;
+      blocks.push(energy(this.recorder.getSamples(next - 1, next)));
+      next += 1;
+      const n = blocks.length;
+      if (n >= 4) {
+        const dB = (e: number) => 10 * Math.log10(e + 1e-12);
+        if (Math.abs(dB(blocks[n - 1]) - dB(blocks[n - 2])) < 0.7 || n >= 12) {
+          const used = blocks.slice(-3);
+          return used.reduce((a, b) => a + b, 0) / used.length;
+        }
+      }
     }
-    return this.running && !this.skipBaseline ? this.recorder.getSamples(start, start + seconds) : null;
+    return null;
   }
 
   // ==================== muting ====================
@@ -484,4 +589,3 @@ export class LiveDriftSession {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-const yieldToUi = () => sleep(0);

@@ -268,6 +268,11 @@ export class LagCurveTracker {
     this.buffer = new Float32Array(0);
   }
 
+  /** Mark a break in the audio: frames never span it (use between separate stretches of audio) */
+  endBlock(): void {
+    this.buffer = new Float32Array(0);
+  }
+
   /** Add newly recorded audio; returns how many frames it completed */
   async push(samples: Float32Array): Promise<number> {
     const merged = new Float32Array(this.buffer.length + samples.length);
@@ -377,4 +382,33 @@ export async function estimateDelay(
   const curve = await computeLagCurve(samples, sampleRate, options);
   if (!curve) return { best: null, peaks: [], frames: 0 };
   return { ...bestPeak(curve), frames: curve.frames };
+}
+
+/** Pearson correlation of two equally long curves (how alike their shapes are, -1 to 1) */
+export function curveCorrelation(a: Float64Array, b: Float64Array): number {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return 0;
+  let ma = 0;
+  let mb = 0;
+  for (let i = 0; i < n; i++) {
+    ma += a[i];
+    mb += b[i];
+  }
+  ma /= n;
+  mb /= n;
+  let num = 0;
+  let da = 0;
+  let db = 0;
+  for (let i = 0; i < n; i++) {
+    num += (a[i] - ma) * (b[i] - mb);
+    da += (a[i] - ma) ** 2;
+    db += (b[i] - mb) ** 2;
+  }
+  return da > 0 && db > 0 ? num / Math.sqrt(da * db) : 0;
+}
+
+export function maxStrength(curve: LagCurve): number {
+  let m = 0;
+  for (let i = 0; i < curve.strength.length; i++) if (curve.strength[i] > m) m = curve.strength[i];
+  return m;
 }

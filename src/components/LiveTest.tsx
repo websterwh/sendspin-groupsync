@@ -5,7 +5,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCalibrationStore, usePlayersStore } from '../store';
 import { analyzeGroups, otherGroupMembers } from '../calibration/grouping';
 import {
+  LEARN_AGREEMENT,
   LiveDriftSession,
+  type LearnProgress,
   type LiveLevels,
   type LiveReading,
   type LiveStage,
@@ -62,11 +64,11 @@ function Run({
   const [muteProblems, setMuteProblems] = useState<MuteProblem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
-  const [stageSince, setStageSince] = useState(Date.now());
   const [levels, setLevels] = useState<LiveLevels | null>(null);
+  const [learn, setLearn] = useState<LearnProgress | null>(null);
   const [volumeNote, setVolumeNote] = useState<VolumeNote | null>(null);
   const [keepVolumes, setKeepVolumes] = useState(false);
-  const [speed, setSpeed] = useState(12);
+  const [speed, setSpeed] = useState(20);
   const [sensitivity, setSensitivity] = useState(12);
   const [, tick] = useState(0);
   const sessionRef = useRef<LiveDriftSession | null>(null);
@@ -87,13 +89,14 @@ function Run({
     void session.run((event) => {
       if (event.type === 'stage') {
         setStage(event.data as LiveStage);
-        setStageSince(Date.now());
       } else if (event.type === 'reading') {
         setReadings((prev) => [...prev.slice(-1500), event.data as LiveReading]);
       } else if (event.type === 'mute_problems') {
         setMuteProblems(event.data as MuteProblem[]);
       } else if (event.type === 'level') {
         setLevel(event.data as number);
+      } else if (event.type === 'learn') {
+        setLearn(event.data as LearnProgress);
       } else if (event.type === 'levels') {
         setLevels(event.data as LiveLevels);
       } else if (event.type === 'volume') {
@@ -118,6 +121,16 @@ function Run({
   const holding = last?.delayMs === null && lastGap !== undefined && last !== undefined && last.t - lastGap.t < 5;
   const shown = holding ? lastGap : last;
   const latest = shown?.delayMs ?? null;
+
+  // How much the readings have been moving over the last ~20 s
+  const recentGaps = readings
+    .filter((r) => last !== undefined && last.t - r.t <= 20 && r.delayMs !== null)
+    .map((r) => r.delayMs as number)
+    .sort((x, y) => x - y);
+  const median = recentGaps.length ? recentGaps[Math.floor(recentGaps.length / 2)] : null;
+  const spread = recentGaps.length ? recentGaps[recentGaps.length - 1] - recentGaps[0] : 0;
+  // Unsteady: plenty of readings found a gap, but not the same one
+  const unsteady = !shown?.locked && recentGaps.length >= 6 && spread > Math.max(1, 0.1 * (median ?? 0));
 
   // What the click test said about this pair (if it has been run for both)
   const clickGap = (() => {
@@ -155,12 +168,30 @@ function Run({
         <div className="p-4 bg-surface rounded-lg text-center space-y-2">
           <p>{stageText}</p>
           {learning && (
-            <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-primary"
-                style={{ width: `${Math.min(100, ((Date.now() - stageSince) / 1000 / 22) * 100)}%`, transition: 'width 1s linear' }}
-              />
-            </div>
+            <>
+              <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary"
+                  style={{
+                    width: `${Math.round(Math.min(1, Math.max(0.05, (learn?.speaker === (stage === 'learn_a' ? 'A' : 'B') ? learn.agreement : 0) / LEARN_AGREEMENT)) * 100)}%`,
+                    transition: 'width 1s linear',
+                  }}
+                />
+              </div>
+              <p className="text-xs text-text-muted">
+                {learn && learn.speaker === (stage === 'learn_a' ? 'A' : 'B')
+                  ? learn.state === 'listening'
+                    ? `Listening ${learn.seconds.toFixed(0)} s, the picture is ${Math.round(Math.max(0, learn.agreement) * 100)}% settled`
+                    : learn.state === 'stable'
+                      ? 'Got it'
+                      : learn.state === 'flat'
+                        ? 'Got it (very little echo here)'
+                        : learn.state === 'loose'
+                          ? "Never fully settled, using what it heard"
+                          : "Couldn't hear enough music to learn this"
+                  : 'Starting…'}
+              </p>
+            </>
           )}
           {levels && learning && (
             <p className="text-xs text-text-muted">
@@ -201,12 +232,24 @@ function Run({
           ) : (
             <>
               <p className={`text-5xl font-bold ${shown?.locked ? 'text-green-300' : 'text-yellow-300'}`}>
-                {latest.toFixed(1)} <span className="text-2xl">ms</span>
+                {unsteady && median !== null ? '~' + median.toFixed(1) : latest.toFixed(1)} <span className="text-2xl">ms</span>
               </p>
               <p className="text-xs text-text-muted">
-                {holding ? 'updating' : shown?.locked ? 'steady' : 'measuring'} · strength {shown?.strength.toFixed(0)}
+                {unsteady
+                  ? `unsteady: ${recentGaps[0].toFixed(1)} to ${recentGaps[recentGaps.length - 1].toFixed(1)} ms over the last 20 s`
+                  : holding
+                    ? 'updating'
+                    : shown?.locked
+                      ? 'steady'
+                      : 'measuring'}{' '}
+                · strength {shown?.strength.toFixed(0)}
                 {!shown?.usedBaseline && ' · room not learned'}
               </p>
+              {unsteady && (
+                <p className="text-xs text-text-muted">
+                  Either the speakers really drift around, or this is noise: check the curve below and try Steady.
+                </p>
+              )}
             </>
           )}
           {clickGap !== null && (
@@ -241,7 +284,7 @@ function Run({
           <Choice
             label="Speed"
             value={speed}
-            options={[[6, 'Fast'], [12, 'Normal'], [25, 'Steady']]}
+            options={[[8, 'Fast'], [20, 'Normal'], [40, 'Steady']]}
             onChange={(v) => {
               setSpeed(v);
               sessionRef.current?.setMemory(v);
@@ -393,19 +436,22 @@ function Choice({
 
 /** Strength of an echo at each delay, right now. A bump above the line is a candidate gap. */
 function CurveChart({ reading, threshold }: { reading: LiveReading; threshold: number }) {
-  const { startMs, endMs, values } = reading.curve;
+  const { startMs, endMs, values, raw } = reading.curve;
   const w = 340;
   const h = 90;
   const pad = { l: 28, r: 6, t: 6, b: 16 };
-  const maxV = Math.max(threshold * 1.6, ...values);
+  const maxV = Math.max(threshold * 1.6, ...values, ...raw);
   const x = (ms: number) => pad.l + ((ms - startMs) / (endMs - startMs)) * (w - pad.l - pad.r);
   const y = (v: number) => pad.t + (1 - Math.max(0, v) / maxV) * (h - pad.t - pad.b);
+  const at = (i: number) => x(startMs + ((i + 0.5) / values.length) * (endMs - startMs)).toFixed(1);
+  const rawPts = raw.map((v, i) => `${at(i)},${y(v).toFixed(1)}`);
   const pts = values.map((v, i) => `${x(startMs + ((i + 0.5) / values.length) * (endMs - startMs)).toFixed(1)},${y(v).toFixed(1)}`);
   return (
     <div>
-      <div className="text-xs text-text-muted mb-1">Echo strength by gap (ms): bumps above the line are candidates</div>
+      <div className="text-xs text-text-muted mb-1">Echo strength by gap (ms). Blue: after room correction, grey: before. Bumps above the red line are candidates</div>
       <svg viewBox={`0 0 ${w} ${h}`} className="w-full bg-surface rounded-lg">
         <line x1={pad.l} x2={w - pad.r} y1={y(threshold)} y2={y(threshold)} stroke="#f87171" strokeDasharray="3 3" strokeWidth="0.8" />
+        <polyline points={rawPts.join(' ')} fill="none" stroke="#6b7280" strokeWidth="0.9" />
         <polyline points={pts.join(' ')} fill="none" stroke="#60a5fa" strokeWidth="1.2" />
         {[0, 50, 100, 150, 200, 250].map((ms) => (
           <text key={ms} x={x(Math.max(ms, startMs))} y={h - 3} fontSize="8" fill="#9ca3af" textAnchor="middle">
