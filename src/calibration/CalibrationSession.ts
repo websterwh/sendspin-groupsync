@@ -29,6 +29,7 @@ export type CalibrationEventType =
   | 'started'
   | 'playback_started'
   | 'clicks_heard'
+  | 'level'
   | 'room_measuring'
   | 'room_measured'
   | 'mute_problems'
@@ -84,6 +85,7 @@ export class CalibrationSession {
   private config: CalibrationConfig;
   private eventCallback: CalibrationEventCallback | null = null;
   private liveTimer: ReturnType<typeof setInterval> | null = null;
+  private levelTimer: ReturnType<typeof setInterval> | null = null;
   private windowTimer: ReturnType<typeof setTimeout> | null = null;
   private measurements: Measurement[] = [];
   private playing = false;
@@ -151,6 +153,7 @@ export class CalibrationSession {
       this.emit({ type: 'playback_started', data: { url: clickTrackUrl } });
 
       this.startLiveDetection();
+      this.startLevelMeter();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Calibration failed';
       this.emit({ type: 'error', data: message });
@@ -221,26 +224,23 @@ export class CalibrationSession {
       const analysis = this.analyze();
       console.log('[CalibrationSession] Analysis:', analysis);
 
-      const arrivals = analysis.rooms
-        .map((room) => room.arrivalMs)
-        .filter((v): v is number => v !== null);
-      const latest = arrivals.length > 0 ? Math.max(...arrivals) : 0;
-
       const results: CalibrationResult[] = [];
       for (const room of analysis.rooms) {
         const info = this.rooms.find((r) => r.playerId === room.playerId);
         const current = await maClient.getPlayerSyncAdjust(room.playerId);
-        // What we measured already includes the delay currently set, so the new value is
-        // current + extra delay needed to line up with the latest-arriving room.
-        const extra = room.arrivalMs === null ? 0 : latest - room.arrivalMs;
+        const isReference = room.playerId === this.rooms[0]?.playerId;
+        // Everything is lined up to the reference room, which stays as it is. A room that arrives
+        // `arrivalMs` late needs that much less delay; one that arrives early needs that much more.
+        // (Measured with the current delay already applied, so this is a change from current.)
+        const change = room.arrivalMs === null || isReference ? 0 : -room.arrivalMs;
         results.push({
           playerId: room.playerId,
           playerName: info?.name ?? room.playerId,
-          offsetMs: Math.round((current ?? 0) + extra),
+          offsetMs: Math.round((current ?? 0) + change),
           arrivalMs: room.arrivalMs ?? undefined,
           currentSyncAdjustMs: current,
           spreadMs: room.spreadMs ?? undefined,
-          isReference: room.playerId === this.rooms[0]?.playerId,
+          isReference,
           confidence: this.confidence(room),
           detectedClicks: room.clicks,
           totalClicks: WINDOW_S,
@@ -418,7 +418,21 @@ export class CalibrationSession {
     }, 1000);
   }
 
+  /**
+   * Smooth microphone level for the meter. Clicks are short bursts, so the raw level jumps
+   * up and down; hold the peak and let it fall slowly instead.
+   */
+  private startLevelMeter(): void {
+    let smoothed = 0;
+    this.levelTimer = setInterval(() => {
+      smoothed = Math.max(this.recorder.level, smoothed * 0.92);
+      this.emit({ type: 'level', data: smoothed });
+    }, 100);
+  }
+
   private stopTimers(): void {
+    if (this.levelTimer) clearInterval(this.levelTimer);
+    this.levelTimer = null;
     this.stopDiagnostics?.();
     this.stopDiagnostics = null;
     if (this.liveTimer) clearInterval(this.liveTimer);

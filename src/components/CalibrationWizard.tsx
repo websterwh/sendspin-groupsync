@@ -26,6 +26,17 @@ export function CalibrationWizard() {
   const leaders = groups.targets;
   const [playOn, setPlayOn] = useState<string>('');
   const playTarget = playOn || leaders[0] || '';
+
+  // Default the reference (baseline) to the group leader, once per selection, so results read as
+  // "how far is each speaker from the lead". The user can still change it with "Make reference".
+  const autoOrdered = useRef('');
+  useEffect(() => {
+    if (phase !== 'instructions') return;
+    const key = selectedPlayerIds.join(',') + '|' + playTarget;
+    if (autoOrdered.current === key) return;
+    autoOrdered.current = key;
+    if (selectedPlayerIds.includes(playTarget) && selectedPlayerIds[0] !== playTarget) makeReference(playTarget);
+  }, [phase, playTarget, selectedPlayerIds, makeReference]);
   const nameOf = (id: string) => players.find((p) => p.player_id === id)?.name ?? id;
 
   // Room order: selected order, then the first room again at the end to measure clock drift
@@ -39,6 +50,7 @@ export function CalibrationWizard() {
   const [measuringName, setMeasuringName] = useState('');
   const [live, setLive] = useState({ total: 0, level: 0, timedOut: false, remaining: 0 });
   const [playing, setPlaying] = useState(false);
+  const [levelPct, setLevelPct] = useState(0);
   const [waitedS, setWaitedS] = useState(0);
   const [diagnostics, setDiagnostics] = useState<PlaybackDiagnostics | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -69,6 +81,7 @@ export function CalibrationWizard() {
   }, []);
 
   const firstRoom = selectedPlayers[0];
+  const referenceResult = Object.values(results).find((r) => r.isReference);
   const isDone = (id: string) => (readings[id]?.clicks ?? 0) > 0;
   const allRoomsDone = selectedPlayers.length > 0 && selectedPlayers.every((p) => isDone(p.player_id));
   const nextRoom = selectedPlayers.find((p) => !isDone(p.player_id));
@@ -101,6 +114,12 @@ export function CalibrationWizard() {
           case 'playback_started':
             setPlaying(true);
             break;
+          case 'level': {
+            // Map dBFS (-60..-10) to the bar so quiet rooms still move it
+            const db = 20 * Math.log10(Math.max(event.data as number, 1e-5));
+            setLevelPct(Math.max(0, Math.min(100, ((db + 60) / 50) * 100)));
+            break;
+          }
           case 'clicks_heard': {
             const d = event.data as {
               total: number;
@@ -146,7 +165,7 @@ export function CalibrationWizard() {
             if (autoPushRef.current) {
               const map: Record<string, CalibrationResult> = {};
               d.results.forEach((r) => (map[r.playerId] = r));
-              pushSyncOffsets(map).then(setPushResults).catch((e) => {
+              pushSyncOffsets(pushable(map)).then(setPushResults).catch((e) => {
                 setError(e instanceof Error ? e.message : 'Auto-push failed');
               });
             }
@@ -199,15 +218,26 @@ export function CalibrationWizard() {
     }
   };
 
+  // Only push speakers that need a change and whose current MA value is known (never overwrite blindly)
+  const pushable = (all: Record<string, CalibrationResult>) =>
+    Object.fromEntries(
+      Object.entries(all).filter(
+        ([, r]) => !r.isReference && r.arrivalMs !== undefined && r.currentSyncAdjustMs !== null && r.currentSyncAdjustMs !== undefined
+      )
+    );
+
   const handleApplyOffsets = async () => {
-    if (Object.keys(results).length === 0) return;
+    if (Object.keys(pushable(results)).length === 0) {
+      setError('Nothing to push: either every speaker is already in sync, or Music Assistant did not report their current sync delay.');
+      return;
+    }
 
     setIsPushing(true);
     setPushResults(null);
     setError(null);
 
     try {
-      setPushResults(await pushSyncOffsets(results));
+      setPushResults(await pushSyncOffsets(pushable(results)));
     } catch (err) {
       console.error('[CalibrationWizard] Failed to apply offsets:', err);
       setError(err instanceof Error ? err.message : 'Failed to apply offsets');
@@ -421,11 +451,11 @@ export function CalibrationWizard() {
             </div>
           )}
 
-          <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-primary transition-all duration-150"
-              style={{ width: `${Math.min(100, live.level * 600)}%` }}
-            />
+          <div>
+            <div className="text-xs text-text-muted mb-1">Microphone level (each click shows as a bump)</div>
+            <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
+              <div className="h-full bg-primary" style={{ width: `${levelPct}%`, transition: 'width 100ms linear' }} />
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -531,11 +561,29 @@ export function CalibrationWizard() {
         <>
           <div className="text-center">
             <div className="text-6xl mb-4">✅</div>
-            <h2 className="text-2xl font-bold mb-2">Calibration Complete</h2>
+            <h2 className="text-2xl font-bold mb-2">
+              How far each speaker is from {referenceResult?.playerName ?? 'the reference'}
+            </h2>
             <p className="text-text-muted">
-              Enter each value in Music Assistant (Player settings &rarr; Audio &rarr; sync delay), or push them from here.
+              {referenceResult?.playerName ?? 'The reference'} is the baseline and stays as it is. Everything
+              else is compared to it.
             </p>
           </div>
+
+          {referenceResult?.warnings && referenceResult.warnings.length > 0 && (
+            <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
+              <p className="font-medium">The baseline ({referenceResult.playerName}) was shaky:</p>
+              <ul className="list-disc list-inside text-yellow-300/70">
+                {referenceResult.warnings.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+              <p className="text-yellow-300/70">
+                Every number below is measured against it, so it inherits that uncertainty. Measure it again, or
+                choose a steadier speaker with <b>Make reference</b> and run the test again.
+              </p>
+            </div>
+          )}
 
           {Object.keys(results).length === 0 ? (
             <div className="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm text-center">
@@ -543,64 +591,89 @@ export function CalibrationWizard() {
             </div>
           ) : (
             <div className="space-y-4">
-              {Object.entries(results).map(([playerId, result]) => (
-                <div key={playerId} className="p-4 bg-surface rounded-lg space-y-2">
-                  <div className="flex justify-between">
-                    <span className="font-medium">
-                      {result.playerName}
-                      {result.isReference && <span className="text-xs text-text-muted ml-2">reference</span>}
-                    </span>
-                    <span className="font-mono text-sm text-text-muted">
-                      {result.arrivalMs === undefined
-                        ? 'no clicks heard'
-                        : `${result.arrivalMs > 0 ? '+' : ''}${result.arrivalMs.toFixed(1)} ms vs reference`}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="text-text-muted">
-                      Sync delay: {result.currentSyncAdjustMs ?? '?'} &rarr;
-                    </span>
-                    <input
-                      type="number"
-                      step="1"
-                      value={result.offsetMs}
-                      onChange={(e) => updateOffset(playerId, parseFloat(e.target.value) || 0)}
-                      className="w-24 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
-                    />
-                    <span className="text-text-muted">ms</span>
-                    <button
-                      onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
-                      className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
-                    >
-                      Copy
-                    </button>
-                  </div>
-
-                  <div className="flex justify-between text-xs text-text-muted">
-                    <span>
-                      Confidence: {Math.round(result.confidence * 100)}%
-                      {result.spreadMs !== undefined && ` (±${result.spreadMs.toFixed(1)} ms)`}
-                    </span>
-                    <span>{result.detectedClicks} clicks used</span>
-                  </div>
-                  {result.warnings && result.warnings.length > 0 && (
-                    <ul className="text-xs text-yellow-300 list-disc list-inside">
-                      {result.warnings.map((w) => (
-                        <li key={w}>{w}</li>
-                      ))}
-                      <li className="list-none text-yellow-300/70">
-                        Consider measuring this one again before trusting the value.
-                      </li>
-                    </ul>
-                  )}
-                  {Math.abs(result.offsetMs) > 500 && (
-                    <div className="text-xs text-yellow-300">
-                      Outside MA&apos;s ±500 ms range; it will be clamped if pushed.
+              {Object.entries(results).map(([playerId, result]) => {
+                const arrival = result.arrivalMs;
+                const ms = arrival === undefined ? 0 : Math.round(Math.abs(arrival));
+                const inSync = arrival !== undefined && ms <= 2;
+                return (
+                  <div key={playerId} className="p-4 bg-surface rounded-lg space-y-2">
+                    <div className="flex justify-between items-baseline">
+                      <span className="font-medium">
+                        {result.playerName}
+                        {result.isReference && (
+                          <span className="text-xs ml-2 px-1.5 py-0.5 bg-primary/30 rounded">Baseline</span>
+                        )}
+                      </span>
                     </div>
-                  )}
-                </div>
-              ))}
+
+                    {result.isReference ? (
+                      <p className="text-text-muted">The others are compared to this speaker.</p>
+                    ) : arrival === undefined ? (
+                      <p className="text-red-300">No clicks heard. Measure this room again.</p>
+                    ) : inSync ? (
+                      <p className="text-lg font-semibold text-green-300">In sync with {referenceResult?.playerName}</p>
+                    ) : (
+                      <>
+                        <p className={`text-2xl font-bold ${arrival > 0 ? 'text-orange-300' : 'text-blue-300'}`}>
+                          {ms} ms {arrival > 0 ? 'late' : 'early'}
+                        </p>
+                        <p className="text-sm">
+                          Plays {ms} ms {arrival > 0 ? 'after' : 'before'} {referenceResult?.playerName}. To fix it,
+                          make it play <b>{ms} ms {arrival > 0 ? 'earlier' : 'later'}</b>.
+                        </p>
+                      </>
+                    )}
+
+                    {!result.isReference && arrival !== undefined && (
+                      <details className="text-sm">
+                        <summary className="cursor-pointer text-text-muted">Music Assistant sync delay</summary>
+                        <div className="mt-2 flex items-center gap-2">
+                          <span className="text-text-muted">
+                            Now {result.currentSyncAdjustMs ?? '?'} &rarr;
+                          </span>
+                          <input
+                            type="number"
+                            step="1"
+                            value={result.offsetMs}
+                            onChange={(e) => updateOffset(playerId, parseFloat(e.target.value) || 0)}
+                            className="w-24 px-2 py-1 bg-background border border-gray-600 rounded font-mono"
+                          />
+                          <span className="text-text-muted">ms</span>
+                          <button
+                            onClick={() => navigator.clipboard?.writeText(String(Math.round(result.offsetMs)))}
+                            className="ml-auto text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                        <p className="text-xs text-text-muted mt-1">
+                          Assumes a bigger number delays the speaker; check that on one player first. If you
+                          compensate for this speaker somewhere else (another setting, or on the device), apply the
+                          change of {arrival > 0 ? '−' : '+'}{ms} ms there instead. MA&apos;s own limit is ±500 ms.
+                        </p>
+                        {Math.abs(result.offsetMs) > 500 && (
+                          <p className="text-xs text-yellow-300">Outside MA&apos;s ±500 ms range; it will be clamped if pushed.</p>
+                        )}
+                      </details>
+                    )}
+
+                    <div className="text-xs text-text-muted">
+                      {result.detectedClicks} clicks used
+                      {result.spreadMs !== undefined && ` · ±${result.spreadMs.toFixed(1)} ms between clicks`}
+                    </div>
+                    {result.warnings && result.warnings.length > 0 && (
+                      <ul className="text-xs text-yellow-300 list-disc list-inside">
+                        {result.warnings.map((w) => (
+                          <li key={w}>{w}</li>
+                        ))}
+                        <li className="list-none text-yellow-300/70">
+                          Consider measuring this one again before trusting the value.
+                        </li>
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
               {((driftPpm !== null && Math.abs(driftPpm) > 100) || audioGaps > 0) && (
                 <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
                   {audioGaps > 0
@@ -610,9 +683,7 @@ export function CalibrationWizard() {
                 </div>
               )}
               <p className="text-xs text-text-muted">
-                Suggested delay = what is set now + the extra delay that lines each room up with the
-                latest-arriving one. Positive values delay a player. Check on one player that a
-                positive value moves its sound later before applying to all.
+                Measured with whatever delays are set right now, so these are changes from the current setup.
                 {driftPpm !== null && ` Clock drift corrected: ${driftPpm.toFixed(0)} ppm.`}
               </p>
             </div>
