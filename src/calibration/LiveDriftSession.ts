@@ -14,7 +14,7 @@
 
 import { MicRecorder } from './MicRecorder';
 import { computeLagCurve, subtractBaselines, bestPeak, type DelayPeak, type LagCurve } from './LiveDelay';
-import { maClient } from '../ma-client';
+import { MuteController } from './muting';
 
 export interface LiveRoom {
   playerId: string;
@@ -86,8 +86,7 @@ export class LiveDriftSession {
   private callback: ((e: LiveEvent) => void) | null = null;
   private running = false;
   private skipBaseline = false;
-  private muteProblems = new Map<string, string>();
-  private mutesChanged = false;
+  private mutes: MuteController;
   private recent: number[] = [];
   private opts: Required<LiveOptions>;
   private curveA: LagCurve | null = null;
@@ -106,6 +105,9 @@ export class LiveDriftSession {
     this.a = a;
     this.b = b;
     this.others = others;
+    this.mutes = new MuteController([a, b, ...others], (problems) =>
+      this.emit({ type: 'mute_problems', data: problems })
+    );
     this.recorder = recorder;
     this.opts = {
       baselineS: options.baselineS ?? 20,
@@ -247,58 +249,15 @@ export class LiveDriftSession {
 
   // ==================== muting ====================
 
-  /** Mute exactly `muted` (and unmute the rest of A, B and the others), verifying each took effect */
+  /** Mute exactly `muted` (and unmute the rest of A, B and the others). Returns names MA refused to mute. */
   private async setMutes(muted: LiveRoom[]): Promise<string[]> {
-    const all = [this.a, this.b, ...this.others];
-    const mutedIds = new Set(muted.map((r) => r.playerId));
-    const failed = new Map<string, string>();
-    await Promise.all(
-      all.map(async (room) => {
-        const shouldMute = mutedIds.has(room.playerId);
-        try {
-          await maClient.playerCommand(room.playerId, 'volume_mute', { muted: shouldMute });
-          this.mutesChanged = true;
-        } catch (error) {
-          if (shouldMute) failed.set(room.name, error instanceof Error ? error.message : String(error));
-        }
-      })
-    );
-    await sleep(600);
-    await Promise.all(
-      muted
-        .filter((room) => !failed.has(room.name))
-        .map(async (room) => {
-          try {
-            const p = await maClient.getPlayer(room.playerId);
-            if ((p.volume_muted ?? p.muted) === false) failed.set(room.name, 'still unmuted');
-          } catch {
-            // can't verify
-          }
-        })
-    );
-    let changed = false;
-    failed.forEach((reason, name) => {
-      if (this.muteProblems.get(name) !== reason) {
-        this.muteProblems.set(name, reason);
-        changed = true;
-      }
-    });
-    if (changed) {
-      this.emit({ type: 'mute_problems', data: Array.from(this.muteProblems, ([name, reason]) => ({ name, reason })) });
-    }
-    return Array.from(failed.keys());
+    const hard = await this.mutes.set(new Set(muted.map((r) => r.playerId)));
+    return hard.map((h) => h.name);
   }
 
   private async cleanup(): Promise<void> {
     this.running = false;
-    if (this.mutesChanged) {
-      this.mutesChanged = false;
-      await Promise.all(
-        [this.a, this.b, ...this.others].map((room) =>
-          maClient.playerCommand(room.playerId, 'volume_mute', { muted: room.muted ?? false }).catch(() => undefined)
-        )
-      );
-    }
+    await this.mutes.restore();
     this.recorder.stop();
   }
 

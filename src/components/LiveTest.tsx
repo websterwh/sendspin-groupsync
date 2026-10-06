@@ -6,6 +6,8 @@ import { useCalibrationStore, usePlayersStore } from '../store';
 import { analyzeGroups, otherGroupMembers } from '../calibration/grouping';
 import { LiveDriftSession, type LiveReading, type LiveStage } from '../calibration/LiveDriftSession';
 import { PlayerList } from './PlayerList';
+import { MuteWarning } from './MuteWarning';
+import type { MuteProblem } from '../calibration/muting';
 
 interface Props {
   onBack: () => void;
@@ -51,7 +53,7 @@ function Run({
 
   const [stage, setStage] = useState<LiveStage>('waiting');
   const [readings, setReadings] = useState<LiveReading[]>([]);
-  const [muteProblems, setMuteProblems] = useState<string[]>([]);
+  const [muteProblems, setMuteProblems] = useState<MuteProblem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
   const [stageSince, setStageSince] = useState(Date.now());
@@ -78,7 +80,7 @@ function Run({
       } else if (event.type === 'reading') {
         setReadings((prev) => [...prev, event.data as LiveReading]);
       } else if (event.type === 'mute_problems') {
-        setMuteProblems((event.data as { name: string }[]).map((m) => m.name));
+        setMuteProblems(event.data as MuteProblem[]);
       } else if (event.type === 'level') {
         setLevel(event.data as number);
       } else if (event.type === 'error') {
@@ -128,11 +130,7 @@ function Run({
       </h2>
 
       {error && <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-red-300 text-sm">{error}</div>}
-      {muteProblems.length > 0 && (
-        <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
-          Couldn&apos;t mute: {muteProblems.join(', ')}. Mute by hand, or readings may be off.
-        </div>
-      )}
+      <MuteWarning problems={muteProblems} />
 
       {stageText && (
         <div className="p-4 bg-surface rounded-lg text-center space-y-2">

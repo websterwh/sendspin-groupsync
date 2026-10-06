@@ -3,6 +3,8 @@ import { useCalibrationStore, usePlayersStore, useConnectionStore } from '../sto
 import { createCalibrationSession, CalibrationSession } from '../calibration';
 import type { RoomReading, MeasurementKind, PlaybackDiagnostics } from '../calibration/CalibrationSession';
 import { analyzeGroups, otherGroupMembers } from '../calibration/grouping';
+import { MuteWarning } from './MuteWarning';
+import type { MuteProblem } from '../calibration/muting';
 import { pushSyncOffsets } from '../sync-push';
 import type { PushResult } from '../sync-push';
 import type { CalibrationResult } from '../types';
@@ -67,7 +69,7 @@ export function CalibrationWizard() {
   const [analyzing, setAnalyzing] = useState(false);
   const [driftPpm, setDriftPpm] = useState<number | null>(null);
   const [audioGaps, setAudioGaps] = useState(0);
-  const [muteProblems, setMuteProblems] = useState<{ name: string; reason: string }[]>([]);
+  const [muteProblems, setMuteProblems] = useState<MuteProblem[]>([]);
   // Speakers whose value the user changed by hand; pushed even when they're within the in-sync margin
   const [edited, setEdited] = useState<Set<string>>(new Set());
 
@@ -160,7 +162,7 @@ export function CalibrationWizard() {
             setProgressClicks((event.data as { clicks: number }).clicks);
             break;
           case 'mute_problems':
-            setMuteProblems(event.data as { name: string; reason: string }[]);
+            setMuteProblems(event.data as MuteProblem[]);
             break;
           case 'analyzing':
             setAnalyzing(true);
@@ -405,11 +407,7 @@ export function CalibrationWizard() {
             </div>
           )}
 
-          {muteProblems.length > 0 && (
-            <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
-              Couldn&apos;t mute: {muteProblems.map((m) => m.name).join(', ')}. Mute by hand before measuring.
-            </div>
-          )}
+          <MuteWarning problems={muteProblems} />
 
           <div className="space-y-2">
             {selectedPlayers.map((player, i) => {

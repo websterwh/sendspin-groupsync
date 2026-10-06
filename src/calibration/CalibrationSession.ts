@@ -18,6 +18,7 @@ import type { CalibrationConfig, CalibrationResult } from '../types';
 import { DEFAULT_CALIBRATION_CONFIG } from '../types';
 import { maClient, resolveClickTrackUrl, getDevServerInfo } from '../ma-client';
 import { findDelaySetting, suggestValue } from '../sync-push/delaySettings';
+import { MuteController } from './muting';
 
 export interface CalibrationRoom {
   playerId: string;
@@ -92,11 +93,10 @@ export class CalibrationSession {
   private measurements: Measurement[] = [];
   private playing = false;
   private measuring = false;
-  private mutesChanged = false;
   private isRunning = false;
   private heardTimes = new Set<number>();
   private lastHeardCount = 0;
-  private muteProblems = new Map<string, string>();
+  private mutes: MuteController;
   private diag: PlaybackDiagnostics | null = null;
   private latestClick: { at: number; snr: number } | null = null;
   private stopDiagnostics: (() => void) | null = null;
@@ -121,6 +121,9 @@ export class CalibrationSession {
     this.queueId = queueId;
     this.rooms = rooms;
     this.others = others;
+    this.mutes = new MuteController([...rooms, ...others], (problems) =>
+      this.emit({ type: 'mute_problems', data: problems })
+    );
     this.serverUrl = serverUrl;
     this.config = { ...DEFAULT_CALIBRATION_CONFIG, ...config };
   }
@@ -336,68 +339,15 @@ export class CalibrationSession {
     return Math.round(countScore * spreadScore * shapePenalty * 100) / 100;
   }
 
-  /** Mute everyone except `playerId` (which is unmuted so it can be heard), then verify it took effect. */
+  /** Mute everyone except `playerId` (which is unmuted so it can be heard). */
   private async applyMutes(playerId: string): Promise<void> {
-    const failed = new Map<string, string>();
     const everyone = [...this.rooms, ...this.others];
-    await Promise.all(
-      everyone.map(async (room) => {
-        const shouldMute = room.playerId !== playerId;
-        try {
-          await maClient.playerCommand(room.playerId, 'volume_mute', { muted: shouldMute });
-          this.mutesChanged = true;
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          console.warn('[CalibrationSession] Could not set mute for', room.name, reason);
-          if (shouldMute) failed.set(room.name, reason);
-        }
-      })
-    );
-
-    // Commands can be accepted without effect (e.g. grouped players); read the state back
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    await Promise.all(
-      everyone
-        .filter((room) => room.playerId !== playerId && !failed.has(room.name))
-        .map(async (room) => {
-          try {
-            const p = await maClient.getPlayer(room.playerId);
-            const muted = p.volume_muted ?? p.muted;
-            if (muted === false) failed.set(room.name, 'mute command accepted but the player is still unmuted');
-          } catch {
-            // can't verify; assume ok
-          }
-        })
-    );
-
-    let changed = false;
-    failed.forEach((reason, name) => {
-      if (this.muteProblems.get(name) !== reason) {
-        this.muteProblems.set(name, reason);
-        changed = true;
-      }
-    });
-    if (changed) {
-      this.emit({
-        type: 'mute_problems',
-        data: Array.from(this.muteProblems, ([name, reason]) => ({ name, reason })),
-      });
-    }
+    await this.mutes.set(new Set(everyone.filter((r) => r.playerId !== playerId).map((r) => r.playerId)));
   }
 
   /** Put every room back to the mute state it had before calibration. */
   private async restoreMutes(): Promise<void> {
-    if (!this.mutesChanged) return;
-    this.mutesChanged = false;
-    await Promise.all(
-      [...this.rooms, ...this.others].map(async (room) => {
-        try {
-          await maClient.playerCommand(room.playerId, 'volume_mute', { muted: room.muted ?? false });
-        } catch (error) {
-          console.warn('[CalibrationSession] Could not restore mute for', room.name, error);
-        }
-      })
-    );
+    await this.mutes.restore();
   }
 
   /** Once a second, scan the last few seconds so the UI can show clicks arriving. */
