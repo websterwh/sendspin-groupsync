@@ -50,6 +50,8 @@ export interface LiveReading {
   usedBaseline: boolean;
   /** Strongest candidates whether or not they passed the threshold */
   candidates: DelayPeak[];
+  /** A small gap that was seen but not clear enough to report (null if none) */
+  weakSmall: DelayPeak | null;
   /** The gap curve behind this reading (strength per delay), coarsely sampled for display */
   curve: { startMs: number; endMs: number; values: number[]; raw: number[] };
 }
@@ -111,6 +113,14 @@ export interface RecorderLike {
 /** Two independent halves of the audio must agree at least this well on the room's echo pattern */
 export const LEARN_AGREEMENT = 0.7;
 const MUSIC_LEVEL = 0.002;
+/**
+ * Gaps below this are hard to tell from room reflections and the music's own bass notes, which make
+ * similar bumps at small delays. They are only reported as a number when the peak is strong and clearly
+ * stands above everything else; otherwise the reading says "no clear gap" (in sync, or unclear).
+ */
+const SMALL_GAP_MS = 10;
+const SMALL_GAP_MIN_STRENGTH = 20;
+const SMALL_GAP_CLEARANCE = 1.4;
 /** Portion of a speaker's echo pattern that remains in the mix once both play (they share the power) */
 const BASELINE_SHARE = 0.5;
 
@@ -376,7 +386,22 @@ export class LiveDriftSession {
       if (!mix || !this.running) continue;
       const learned = this.curveA && this.curveB;
       const curve = learned ? subtractBaselines(mix, [this.curveA!, this.curveB!], this.weights) : mix;
-      const { best, peaks } = bestPeak(curve, this.opts.minStrength);
+      const { peaks } = bestPeak(curve, this.opts.minStrength);
+      // Strongest peak that is convincing: small gaps need to be strong and stand clear of the rest
+      let best: DelayPeak | null = null;
+      let weakSmall: DelayPeak | null = null;
+      for (const p of peaks) {
+        if (p.strength < this.opts.minStrength) break;
+        if (p.delayMs < SMALL_GAP_MS) {
+          const other = peaks.reduce((m, q) => (q !== p ? Math.max(m, q.strength) : m), 0);
+          if (p.strength < SMALL_GAP_MIN_STRENGTH || p.strength < SMALL_GAP_CLEARANCE * other) {
+            weakSmall = weakSmall ?? p;
+            continue;
+          }
+        }
+        best = p;
+        break;
+      }
       const lagMs = (i: number) => ((curve.lagLo + i) / curve.sampleRate) * 1000;
       const bins = 200;
       const values = new Array<number>(bins).fill(0);
@@ -401,6 +426,7 @@ export class LiveDriftSession {
           locked,
           usedBaseline: !!learned,
           candidates: peaks.slice(0, 3),
+          weakSmall,
           curve: { startMs: lagMs(0), endMs: lagMs(curve.strength.length - 1), values, raw },
         } satisfies LiveReading,
       });

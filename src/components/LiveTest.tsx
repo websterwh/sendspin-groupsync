@@ -220,12 +220,16 @@ function Run({
             <p className="text-text-muted">Collecting audio…</p>
           ) : latest === null ? (
             <>
-              <p className="text-2xl font-bold text-text-muted">No gap found</p>
-              <p className="text-xs text-text-muted">In sync (under 1.5 ms), music too quiet, or one speaker not heard.</p>
-              {last.candidates[0] && (
+              <p className="text-2xl font-bold text-text-muted">No clear gap</p>
+              <p className="text-xs text-text-muted">
+                {last.weakSmall || (last.candidates[0] && last.candidates[0].delayMs < 10)
+                  ? 'Probably in sync (within about 10 ms). Gaps that small can\'t be told from room echoes.'
+                  : 'In sync, music too quiet, or one speaker not heard.'}
+              </p>
+              {(last.weakSmall ?? last.candidates[0]) && (
                 <p className="text-xs text-text-muted">
-                  Strongest candidate: {last.candidates[0].delayMs.toFixed(1)} ms (strength{' '}
-                  {last.candidates[0].strength.toFixed(0)}, needs {sensitivity})
+                  Weak candidate: {(last.weakSmall ?? last.candidates[0]).delayMs.toFixed(1)} ms (strength{' '}
+                  {(last.weakSmall ?? last.candidates[0]).strength.toFixed(0)})
                 </p>
               )}
             </>
