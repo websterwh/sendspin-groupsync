@@ -69,7 +69,9 @@ const MIN_LEVEL_DB = 6;
 const CONFIRM_STRENGTH = 30;
 const LABEL_WINDOW_MS = 20;
 const RECENTRE_MS = 25;
-const FIND_TIMEOUT_S = 60;
+const FIND_TIMEOUT_S = 150;
+/** If Music Assistant hasn't started the song by then, ask the user to press play */
+const ASK_FOR_PLAY_S = 10;
 
 const rms = (x: Float32Array) => {
   let e = 0;
@@ -175,6 +177,14 @@ export class SongSession {
 
   // ==================== stages ====================
 
+  private async queueName(): Promise<string> {
+    try {
+      return (await maClient.getPlayer(this.queueId)).name ?? 'the player';
+    } catch {
+      return 'the player';
+    }
+  }
+
   /** Explain, from what Music Assistant did, why the song may not be playing */
   private async diagnose(): Promise<string> {
     const stats = await getSongStats(this.serverUrl);
@@ -208,7 +218,14 @@ export class SongSession {
       const now = this.recorder.elapsed;
       if (now - lastNote >= 5) {
         lastNote = now;
-        this.emit({ type: 'info', data: `Waiting for the song… ${await this.diagnose()}` });
+        const note = await this.diagnose();
+        const idle = now - playedAt > ASK_FOR_PLAY_S && !note.includes('"playing"');
+        this.emit({
+          type: 'info',
+          data: idle
+            ? `Music Assistant loaded the song but didn't start it. Press play on ${await this.queueName()} in Music Assistant and GroupSync will carry on from there. (${note})`
+            : `Waiting for the song… ${note}`,
+        });
       }
       if (now - playedAt > FIND_TIMEOUT_S) {
         throw new Error(`Couldn't hear the song. ${await this.diagnose()}`);
