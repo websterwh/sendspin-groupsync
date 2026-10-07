@@ -70,8 +70,9 @@ const CONFIRM_STRENGTH = 30;
 const LABEL_WINDOW_MS = 20;
 const RECENTRE_MS = 25;
 const FIND_TIMEOUT_S = 150;
-/** If Music Assistant hasn't started the song by then, ask the user to press play */
-const ASK_FOR_PLAY_S = 10;
+/** Seconds after a start before a player that isn't playing gets another start */
+const RESTART_AFTER_S = 9;
+const MAX_RESTARTS = 3;
 
 const rms = (x: Float32Array) => {
   let e = 0;
@@ -206,37 +207,53 @@ export class SongSession {
     return parts.join(' ');
   }
 
-  /** Wait until the song is audible, then locate it in the recording */
-  private async findSong(playedAt: number): Promise<void> {
+  /**
+   * Wait until the song is audible, then locate it in the recording.
+   *
+   * Music Assistant starts the song, and about a second later clears it again: the Shield's cast app only
+   * launches a few seconds after the command, and by then the group has been dropped. Starting the song
+   * a second time, once the cast app is up, works (and so does pressing play by hand). So if the player
+   * isn't playing some seconds after a start, start it again, a few times, before asking the user.
+   */
+  private async findSong(startedAt: number): Promise<void> {
     this.setStage('finding');
     const sr = this.recorder.sampleRate;
     const window = 8;
     let lastNote = 0;
+    let lastTry = 0;
+    let lastStart = startedAt;
+    let restarts = 0;
     while (this.running) {
       await sleep(1000);
       this.emit({ type: 'level', data: this.recorder.level });
       const now = this.recorder.elapsed;
-      if (now - lastNote >= 5) {
-        lastNote = now;
-        const note = await this.diagnose();
-        const idle = now - playedAt > ASK_FOR_PLAY_S && !note.includes('"playing"');
-        this.emit({
-          type: 'info',
-          data: idle
-            ? `Music Assistant loaded the song but didn't start it. Press play on ${await this.queueName()} in Music Assistant and GroupSync will carry on from there. (${note})`
-            : `Waiting for the song… ${note}`,
-        });
-      }
-      if (now - playedAt > FIND_TIMEOUT_S) {
+      if (now - startedAt > FIND_TIMEOUT_S) {
         throw new Error(`Couldn't hear the song. ${await this.diagnose()}`);
       }
-      if (now < window + 2) continue;
+      if (now - lastNote >= 4) {
+        lastNote = now;
+        const note = await this.diagnose();
+        const playing = note.includes('"playing"');
+        if (!playing && now - lastStart > RESTART_AFTER_S && restarts < MAX_RESTARTS) {
+          restarts++;
+          lastStart = now;
+          this.emit({ type: 'info', data: `Music Assistant dropped the song right after starting it (the Shield's cast app launches slowly). Starting it again (${restarts}/${MAX_RESTARTS})…` });
+          await maClient.playMedia(this.queueId, this.songUrl, 'replace');
+        } else if (!playing && now - lastStart > RESTART_AFTER_S) {
+          this.emit({ type: 'info', data: `Music Assistant won't keep the song playing. Press play on ${await this.queueName()} in Music Assistant and GroupSync will carry on from there. (${note})` });
+        } else {
+          this.emit({ type: 'info', data: `Waiting for the song… ${note}` });
+        }
+      }
+      if (now < window + 2 || now - lastTry < 3) continue;
+      lastTry = now;
       const startS = now - window;
       const mic = this.recorder.getSamples(startS, now);
-      const found = findOffset(this.song, mic, Math.round(startS * sr), sr, Math.floor(now * sr));
+      // The song may be picked up part-way in (Music Assistant resumes where it left off): search all of it
+      const found = findOffset(this.song, mic, Math.round(startS * sr), sr, this.song.length);
       if (found && this.confirm(found.offset, now)) {
         this.offset = found.offset;
-        this.emit({ type: 'info', data: `Found the song (match ${found.quality.toFixed(0)}, it starts ${(found.offset / sr).toFixed(3)} s into the recording).` });
+        this.emit({ type: 'info', data: `Found the song (match ${found.quality.toFixed(0)}).` });
         return;
       }
     }

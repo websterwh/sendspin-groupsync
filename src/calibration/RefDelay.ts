@@ -65,6 +65,8 @@ function spectrum(x: Float32Array, start: number, n: number): { re: Float64Array
   return { re, im };
 }
 
+const decimatedSongs = new WeakMap<Float32Array, Float32Array>();
+
 /**
  * Find where the song sits inside the recording: returns the number of samples by which the recording is
  * later than the song (recording index = song index + offset), or null if the song isn't heard.
@@ -81,7 +83,12 @@ export function findOffset(
 ): { offset: number; quality: number } | null {
   const D = 8;
   const m = decimate(mic, D);
-  const head = decimate(song.subarray(0, Math.min(song.length, maxSongSamples)), D);
+  let full = decimatedSongs.get(song);
+  if (!full) {
+    full = decimate(song, D);
+    decimatedSongs.set(song, full);
+  }
+  const head = full.subarray(0, Math.min(full.length, Math.ceil(maxSongSamples / D)));
   if (m.length < 2048 || head.length < m.length / 4) return null;
   // Silence in front of the song: the recording may begin before the song starts
   const s = new Float32Array(m.length + head.length);
