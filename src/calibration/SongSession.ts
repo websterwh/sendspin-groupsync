@@ -62,6 +62,8 @@ const ALIGN_MARGIN = 0; // the speaker heard while finding the song sits at lag 
 const LEARN_MIN_FRAMES = 4;
 const LEARN_MAX_S = 25;
 const MUTE_GUARD_S = 3;
+/** After a delay change, audio from this long on counts (the speaker needs a moment to apply it) */
+const CHANGE_GUARD_S = 2.5;
 const MIN_PEAK_STRENGTH = 12;
 /** A speaker's own peak must reach this before it is accepted while learning (noise peaks stay lower) */
 const LEARN_STRENGTH = 12;
@@ -99,6 +101,7 @@ export class SongSession {
   private callback: ((e: SongEvent) => void) | null = null;
   private running = false;
   private relearn = false;
+  private invalidated = false;
   private playing = false;
   private memoryS = 8;
   private tracker: RefTracker | null = null;
@@ -141,6 +144,11 @@ export class SongSession {
   setMemory(seconds: number): void {
     this.memoryS = seconds;
     this.tracker?.setMemory(seconds);
+  }
+
+  /** A delay was just changed: forget the readings so far and measure again from fresh audio */
+  invalidate(): void {
+    this.invalidated = true;
   }
 
   /** Measure both speakers alone again (e.g. after moving the phone or a big delay change) */
@@ -413,6 +421,14 @@ export class SongSession {
       await sleep(250);
       this.emit({ type: 'level', data: this.recorder.level });
       const now = this.recorder.elapsed;
+      if (this.invalidated) {
+        this.invalidated = false;
+        tracker.reset();
+        this.recent = [];
+        this.refStrA = this.refStrB = this.refCount = this.weakRun = 0;
+        at = now + CHANGE_GUARD_S;
+        continue;
+      }
       let pushed = false;
       while (at + frameS <= now) {
         const f = this.frame(at);

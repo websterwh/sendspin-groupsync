@@ -72,3 +72,10 @@ export function suggestValue(setting: DelaySetting, earlierByMs: number): { valu
   const value = Math.max(setting.min, Math.min(setting.max, wanted));
   return { value, clamped: value !== wanted };
 }
+
+/** Write a new value for a delay setting straight away (Music Assistant applies these immediately) */
+export async function applyDelayValue(setting: DelaySetting, value: number): Promise<number> {
+  const clamped = Math.max(setting.min, Math.min(setting.max, Math.round(value)));
+  await maClient.sendCommand('config/players/save', { player_id: setting.configPlayerId, values: { [setting.key]: clamped } }, 5000);
+  return clamped;
+}

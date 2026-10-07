@@ -82,6 +82,7 @@ function Run({
   }
   const log = logRef.current;
   const [copied, setCopied] = useState<string | null>(null);
+  const [stopped, setStopped] = useState(false);
 
   // Other members of the same sync group are muted for the whole test (they would add echoes)
   const others = useMemo(() => {
@@ -353,39 +354,46 @@ function Run({
         </button>
       </div>
 
-      <div className="flex gap-3">
-        <button
-          onClick={() => {
-            sessionRef.current?.resetReadings();
-            log.event('clear');
-            setReadings([]);
-          }}
-          disabled={stage !== 'live'}
-          className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
-        >
-          Clear
+      {stopped || error ? (
+        <button onClick={onExit} className="w-full py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium">
+          Back
         </button>
-        <button
-          onClick={() => {
-            sessionRef.current?.learnAgain();
-            log.event('relearn');
-            setReadings([]);
-          }}
-          disabled={stage !== 'live'}
-          className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
-        >
-          Relearn room
-        </button>
-        <button
-          onClick={() => {
-            sessionRef.current?.stop();
-            onExit();
-          }}
-          className="flex-1 py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium"
-        >
-          Stop
-        </button>
-      </div>
+      ) : (
+        <div className="flex gap-3">
+          <button
+            onClick={() => {
+              sessionRef.current?.resetReadings();
+              log.event('clear');
+              setReadings([]);
+            }}
+            disabled={stage !== 'live'}
+            className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
+          >
+            Clear
+          </button>
+          <button
+            onClick={() => {
+              sessionRef.current?.learnAgain();
+              log.event('relearn');
+              setReadings([]);
+            }}
+            disabled={stage !== 'live'}
+            className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
+          >
+            Relearn room
+          </button>
+          <button
+            onClick={() => {
+              sessionRef.current?.stop();
+              log.event('stopped');
+              setStopped(true);
+            }}
+            className="flex-1 py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium"
+          >
+            Stop
+          </button>
+        </div>
+      )}
     </div>
   );
 }

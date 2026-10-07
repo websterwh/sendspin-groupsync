@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 /** Which tool is open once connected */
-export type Screen = 'home' | 'click' | 'live' | 'song';
+export type Screen = 'home' | 'click' | 'live';
 
 interface AppState {
   screen: Screen;

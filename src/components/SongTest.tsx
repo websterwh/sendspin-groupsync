@@ -9,6 +9,7 @@ import { SongSession, type SongLearn, type SongReading, type SongStage } from '.
 import { LiveLog } from '../calibration/liveLog';
 import { listSongs } from '../ma-client';
 import { PlayerList } from './PlayerList';
+import { applyDelayValue, findDelaySetting, type DelaySetting } from '../sync-push/delaySettings';
 import { MuteWarning } from './MuteWarning';
 import type { MuteProblem } from '../calibration/muting';
 
@@ -147,6 +148,8 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
   const later = gap === null ? null : gap > 0 ? b.name : a.name;
   const earlier = gap === null ? null : gap > 0 ? a.name : b.name;
   const abs = gap === null ? null : Math.abs(gap);
+  // While a reading is missing (right after a change, say) keep showing the last one for a little, greyed out
+  const lastKnown = reading ? [...history].reverse().find((h) => h.gap !== null && reading.t - h.t < 25) : undefined;
 
   return (
     <div className="space-y-4 pb-8">
@@ -180,12 +183,14 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
               </p>
             </>
           ) : abs === null ? (
-            <>
-              <p className="text-xl">Can't see both speakers</p>
-              <p className="text-xs text-text-muted mt-1">
-                {reading ? `Strongest peaks: ${reading.peaks.slice(0, 3).map((p) => `${p.ms.toFixed(1)} ms (${p.strength.toFixed(0)})`).join(', ')}` : 'Collecting audio…'}
-              </p>
-            </>
+            lastKnown ? (
+              <>
+                <p className="text-4xl font-bold text-text-muted">{Math.abs(lastKnown.gap!).toFixed(1)} ms</p>
+                <p className="text-sm text-text-muted mt-1">updating…</p>
+              </>
+            ) : (
+              <p className="text-xl text-text-muted">Measuring…</p>
+            )
           ) : abs < 1 ? (
             <p className="text-3xl font-bold text-secondary">In sync (under 1 ms)</p>
           ) : (
@@ -209,6 +214,25 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
 
       {reading && <CurveChart reading={reading} />}
       {history.length > 2 && <GapHistory history={history} />}
+
+      {stage === 'live' && !stopped && !error && (
+        <div className="space-y-2">
+          <p className="text-xs text-text-muted">Delay settings (applied at once, then the reading restarts)</p>
+          {[a, b].map((p) => (
+            <DelayControl
+              key={p.player_id}
+              playerId={p.player_id}
+              name={p.name}
+              onChanged={(from, to, key) => {
+                log.event('delay', { player: p.name, key, from, to });
+                sessionRef.current?.invalidate();
+                setHistory([]);
+                setReading((r) => (r ? { ...r, gapMs: null } : r));
+              }}
+            />
+          ))}
+        </div>
+      )}
 
       {stage === 'live' && (
         <div className="flex items-center gap-2 text-xs">
@@ -317,6 +341,91 @@ function GapHistory({ history }: { history: { t: number; gap: number | null }[] 
         {history.map((h, i) => (h.gap === null ? null : <circle key={i} cx={px(h.t)} cy={py(h.gap)} r="0.7" fill="#38bdf8" />))}
       </svg>
       <p className="text-xs text-text-muted text-center">Gap over time (above the line: second speaker later)</p>
+    </div>
+  );
+}
+
+const STEPS = [-10, -5, -1, 1, 5, 10];
+
+/** The Music Assistant delay setting for one speaker, with steppers. Changes are written after a short pause. */
+function DelayControl({ playerId, name, onChanged }: { playerId: string; name: string; onChanged: (from: number, to: number, key: string) => void }) {
+  const [setting, setSetting] = useState<DelaySetting | null | undefined>(undefined);
+  const [value, setValue] = useState(0);
+  const [applied, setApplied] = useState(0);
+  const [status, setStatus] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const appliedRef = useRef(0);
+
+  useEffect(() => {
+    let alive = true;
+    void findDelaySetting(playerId).then((st) => {
+      if (!alive) return;
+      setSetting(st);
+      if (st) {
+        setValue(st.current);
+        setApplied(st.current);
+        appliedRef.current = st.current;
+      }
+    });
+    return () => {
+      alive = false;
+      if (timer.current) clearTimeout(timer.current);
+    };
+  }, [playerId]);
+
+  const schedule = (next: number, immediately = false) => {
+    if (!setting) return;
+    const v = Math.max(setting.min, Math.min(setting.max, Math.round(next)));
+    setValue(v);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      if (v === appliedRef.current) return;
+      setStatus('Applying…');
+      try {
+        const from = appliedRef.current;
+        const done = await applyDelayValue(setting, v);
+        appliedRef.current = done;
+        setApplied(done);
+        setStatus(null);
+        onChanged(from, done, setting.key);
+      } catch (e) {
+        setStatus(e instanceof Error ? e.message : 'Could not apply');
+      }
+    }, immediately ? 0 : 700);
+  };
+
+  if (setting === undefined) return <div className="p-2 bg-surface rounded text-xs text-text-muted">{name}: looking up its delay setting…</div>;
+  if (setting === null) return <div className="p-2 bg-surface rounded text-xs text-text-muted">{name}: no delay setting found in Music Assistant</div>;
+
+  return (
+    <div className="p-2 bg-surface rounded space-y-1">
+      <div className="flex items-center justify-between text-xs">
+        <span>{name}</span>
+        <span className="text-text-muted">
+          {setting.label}: {applied} ms{setting.higherIsEarlier ? ' (higher = earlier)' : ' (higher = later)'}
+        </span>
+      </div>
+      <div className="flex items-center gap-1">
+        {STEPS.slice(0, 3).map((d) => (
+          <button key={d} onClick={() => schedule(value + d)} className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded">
+            {d}
+          </button>
+        ))}
+        <input
+          type="number"
+          value={value}
+          onChange={(e) => setValue(Number(e.target.value))}
+          onBlur={() => schedule(value, true)}
+          onKeyDown={(e) => e.key === 'Enter' && schedule(value, true)}
+          className="w-16 px-1 py-1 text-xs text-center bg-background border border-gray-600 rounded"
+        />
+        {STEPS.slice(3).map((d) => (
+          <button key={d} onClick={() => schedule(value + d)} className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded">
+            +{d}
+          </button>
+        ))}
+      </div>
+      {status && <p className="text-xs text-text-muted">{status}</p>}
     </div>
   );
 }

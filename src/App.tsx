@@ -6,8 +6,7 @@ import { PlayerList } from './components/PlayerList';
 import { CalibrationWizard } from './components/CalibrationWizard';
 
 // Dev-only tool: not part of production builds (and so not in the Home Assistant add-on)
-const LiveTest = import.meta.env.DEV ? lazy(() => import('./components/LiveTest')) : null;
-const SongTest = import.meta.env.DEV ? lazy(() => import('./components/SongTest')) : null;
+const LiveHub = import.meta.env.DEV ? lazy(() => import('./components/LiveHub')) : null;
 
 function App() {
   const { connected } = useConnectionStore();
@@ -35,13 +34,9 @@ function App() {
           <ConnectionPanel />
         ) : screen === 'home' ? (
           <Home />
-        ) : screen === 'live' && LiveTest ? (
+        ) : screen === 'live' && LiveHub ? (
           <Suspense fallback={<p className="text-text-muted">Loading…</p>}>
-            <LiveTest onBack={() => setScreen('home')} />
-          </Suspense>
-        ) : screen === 'song' && SongTest ? (
-          <Suspense fallback={<p className="text-text-muted">Loading…</p>}>
-            <SongTest onBack={() => setScreen('home')} />
+            <LiveHub onBack={() => setScreen('home')} />
           </Suspense>
         ) : phase === 'idle' || phase === 'selecting' ? (
           <PlayerList onBack={() => setScreen('home')} />
