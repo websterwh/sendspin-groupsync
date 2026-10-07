@@ -14,7 +14,7 @@
 import { MicRecorder } from './MicRecorder';
 import { MuteController, type MuteProblem } from './muting';
 import { maClient, fetchSong, resolveSongUrl, getSongStats } from '../ma-client';
-import { RefTracker, findOffset, pickPeaks, toMono, REF_FRAME, type RefCurve, type RefPeak } from './RefDelay';
+import { RefTracker, findOffset, fitSpeakers, pickPeaks, toMono, REF_FRAME, type RefCurve, type RefPeak } from './RefDelay';
 import type { RecorderLike } from './LiveDriftSession';
 
 export interface SongRoom {
@@ -67,7 +67,8 @@ const LEARN_STRENGTH = 18;
 const MIN_LEVEL_DB = 6;
 /** A real match shows a peak far above this in the detailed comparison (simulated ones are 100+, noise stays below 20) */
 const CONFIRM_STRENGTH = 30;
-const LABEL_WINDOW_MS = 20;
+/** A speaker's learned pattern must fit the live curve at least this clearly to count as seen */
+const FIT_MIN_STRENGTH = 4;
 const RECENTRE_MS = 25;
 const FIND_TIMEOUT_S = 150;
 /** Seconds after a start before a player that isn't playing gets another start */
@@ -102,8 +103,9 @@ export class SongSession {
   private offset = 0;
   private pA = 0;
   private pB = 0;
-  /** Where A's room echoes sit relative to its direct sound (learned with A alone) */
-  private patternA: number[] = [];
+  /** What each speaker looks like on the curve when it plays alone (direct sound plus its room's echoes) */
+  private curveA: RefCurve | null = null;
+  private curveB: RefCurve | null = null;
   private recent: number[] = [];
   private songUrl = '';
   private noiseRms = 0;
@@ -218,7 +220,7 @@ export class SongSession {
   private async findSong(startedAt: number): Promise<void> {
     this.setStage('finding');
     const sr = this.recorder.sampleRate;
-    const window = 8;
+    const window = 12;
     let lastNote = 0;
     let lastTry = 0;
     let lastStart = startedAt;
@@ -250,8 +252,9 @@ export class SongSession {
       const startS = now - window;
       const mic = this.recorder.getSamples(startS, now);
       // The song may be picked up part-way in (Music Assistant resumes where it left off): search all of it
-      const found = findOffset(this.song, mic, Math.round(startS * sr), sr, this.song.length);
-      if (found && this.confirm(found.offset, now)) {
+      const candidates = findOffset(this.song, mic, Math.round(startS * sr), sr, this.song.length);
+      const found = candidates.find((c) => this.confirm(c.offset, now));
+      if (found) {
         this.offset = found.offset;
         this.emit({ type: 'info', data: `Found the song (match ${found.quality.toFixed(0)}).` });
         return;
@@ -291,13 +294,16 @@ export class SongSession {
   private async learnBoth(): Promise<void> {
     const a = await this.learnOne('A');
     this.pA = a.ms;
-    this.patternA = a.pattern;
+    this.curveA = a.curve;
     if (!this.running) return;
-    this.pB = (await this.learnOne('B')).ms;
+    const b = await this.learnOne('B');
+    this.pB = b.ms;
+    this.curveB = b.curve;
+    this.emit({ type: 'info', data: `Measured with each speaker alone: ${this.b.name} is ${(b.ms - a.ms).toFixed(2)} ms ${b.ms - a.ms >= 0 ? 'later' : 'earlier'} than ${this.a.name}.` });
   }
 
   /** Play one speaker alone and return where its (strongest) peak sits */
-  private async learnOne(which: 'A' | 'B'): Promise<{ ms: number; pattern: number[] }> {
+  private async learnOne(which: 'A' | 'B'): Promise<{ ms: number; curve: RefCurve }> {
     this.setStage(which === 'A' ? 'learn_a' : 'learn_b');
     const mine = which === 'A' ? this.a : this.b;
     const rest = [which === 'A' ? this.b : this.a, ...this.others];
@@ -308,7 +314,7 @@ export class SongSession {
     let at = began + MUTE_GUARD_S;
     const frameS = REF_FRAME / this.recorder.sampleRate;
     const tops: number[] = [];
-    let last: { ms: number; strength: number; pattern: number[] } | null = null;
+    let last: { ms: number; strength: number; curve: RefCurve } | null = null;
     let levelDb: number | null = null;
     while (this.running) {
       await sleep(400);
@@ -330,8 +336,7 @@ export class SongSession {
       const found = curve ? pickPeaks(curve, 8) : [];
       const top = found[0];
       if (top) {
-        const pattern = found.slice(1).filter((p) => p.strength >= MIN_PEAK_STRENGTH * 0.6).map((p) => p.ms - top.ms);
-        last = { ms: top.ms, strength: top.strength, pattern };
+        last = { ms: top.ms, strength: top.strength, curve: curve! };
         tops.push(top.ms);
       }
       // Settled: the same peak, strong, over the last four frames
@@ -345,7 +350,7 @@ export class SongSession {
         type: 'learn',
         data: { speaker: which, seconds: Math.max(0, heard), ms: last?.ms ?? null, strength: last?.strength ?? 0, stable: settled, levelDb } satisfies SongLearn,
       });
-      if (settled && last) return { ms: last.ms, pattern: last.pattern };
+      if (settled && last) return { ms: last.ms, curve: last.curve };
       const quiet = levelDb !== null && levelDb < MIN_LEVEL_DB;
       if ((quiet && heard > 8) || heard > LEARN_MAX_S) {
         if (quiet) {
@@ -356,7 +361,7 @@ export class SongSession {
         throw new Error(`Couldn't get a clear reading of ${mine.name} (best peak ${last ? last.strength.toFixed(0) : 0}, needs ${LEARN_STRENGTH}). ${await this.diagnose()}`);
       }
     }
-    return { ms: 0, pattern: [] };
+    throw new Error('Stopped');
   }
 
   private async liveLoop(): Promise<void> {
@@ -388,18 +393,17 @@ export class SongSession {
   }
 
   /**
-   * Match the curve's peaks to the two speakers. A is the peak nearest where it was learned. B is the
-   * strongest of the remaining peaks that isn't one of A's own room echoes, so B can be found wherever
-   * its delay has been moved to.
+   * Follow the two speakers: slide each one's learned pattern (direct sound plus echoes) along the curve and
+   * take the position that fits best.
    */
   private reading(curve: RefCurve, t: number): SongReading {
     const peaks = pickPeaks(curve, 10).filter((p) => p.strength >= MIN_PEAK_STRENGTH * 0.6);
-    const pa = peaks
-      .filter((p) => Math.abs(p.ms - this.pA) <= LABEL_WINDOW_MS)
-      .sort((x, y) => Math.abs(x.ms - this.pA) - Math.abs(y.ms - this.pA) || y.strength - x.strength)[0];
-    const isEcho = (p: RefPeak) => !!pa && this.patternA.some((o) => Math.abs(p.ms - pa.ms - o) < 0.35);
-    const pb = peaks.filter((p) => p !== pa && !isEcho(p)).sort((x, y) => y.strength - x.strength)[0];
-    const gapMs = pa && pb && pa !== pb ? pb.ms - pa.ms : null;
+    const fit = this.curveA && this.curveB ? fitSpeakers(curve, this.curveA, this.curveB) : null;
+    const seenA = !!fit && fit.strengthA >= FIT_MIN_STRENGTH;
+    const seenB = !!fit && fit.strengthB >= FIT_MIN_STRENGTH;
+    const pa = seenA ? { ms: fit!.aMs, strength: fit!.strengthA } : undefined;
+    const pb = seenB ? { ms: fit!.bMs, strength: fit!.strengthB } : undefined;
+    const gapMs = pa && pb ? pb.ms - pa.ms : null;
     this.recent = gapMs === null ? [] : [...this.recent, gapMs].slice(-4);
     const locked = this.recent.length === 4 && Math.max(...this.recent) - Math.min(...this.recent) <= 0.3;
 

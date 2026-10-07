@@ -34,6 +34,9 @@ export interface RefCurve {
   frames: number;
 }
 
+/** Coarse matches weaker than this (peak over the average level) are not even tried */
+const MIN_MATCH_QUALITY = 9;
+
 const nextPow2 = (n: number) => 1 << Math.ceil(Math.log2(Math.max(2, n)));
 
 /** Mono copy of an AudioBuffer-like set of channels */
@@ -80,7 +83,7 @@ export function findOffset(
   micStart: number,
   sampleRate: number,
   maxSongSamples: number
-): { offset: number; quality: number } | null {
+): { offset: number; quality: number }[] {
   const D = 8;
   const m = decimate(mic, D);
   let full = decimatedSongs.get(song);
@@ -89,7 +92,7 @@ export function findOffset(
     decimatedSongs.set(song, full);
   }
   const head = full.subarray(0, Math.min(full.length, Math.ceil(maxSongSamples / D)));
-  if (m.length < 2048 || head.length < m.length / 4) return null;
+  if (m.length < 2048 || head.length < m.length / 4) return [];
   // Silence in front of the song: the recording may begin before the song starts
   const s = new Float32Array(m.length + head.length);
   s.set(head, m.length);
@@ -99,7 +102,7 @@ export function findOffset(
   const M = spectrum(m, 0, N);
   const mMag = Array.from(M.re, (r, i) => Math.hypot(r, M.im[i]) + 1e-12);
 
-  let best = { idx: -1, val: 0 };
+  const blockBest: { idx: number; val: number }[] = [];
   let sum = 0;
   let count = 0;
   for (let b = 0; b * hop < s.length; b++) {
@@ -118,21 +121,24 @@ export function findOffset(
     }
     fft(re, im, true);
     // lag l (song block start b*hop) -> recording index = song index + lag; only non-negative, valid lags
+    let top = { idx: -1, val: 0 };
     for (let l = 0; l < hop; l++) {
       const v = re[l];
       sum += Math.abs(v);
       count++;
-      if (v > best.val) best = { idx: b * hop + l, val: v };
+      if (v > top.val) top = { idx: b * hop + l, val: v };
     }
+    if (top.idx >= 0) blockBest.push(top);
   }
-  if (best.idx < 0) return null;
   const meanAbs = sum / Math.max(1, count);
-  const quality = best.val / (meanAbs + 1e-12);
-  // lag is "recording later than song" in decimated samples, relative to the mic stretch's own start
+  // The best few matches (one per stretch of the song, strongest first): the caller confirms them in detail
   // best.idx = song position where the mic stretch begins  =>  mic start corresponds to song sample best.idx*D
-  const offset = micStart - (best.idx - m.length) * D;
   void sampleRate;
-  return quality > 20 ? { offset, quality } : null;
+  return blockBest
+    .sort((x, y) => y.val - x.val)
+    .slice(0, 3)
+    .map((c) => ({ offset: micStart - (c.idx - m.length) * D, quality: c.val / (meanAbs + 1e-12) }))
+    .filter((c) => c.quality > MIN_MATCH_QUALITY);
 }
 
 /**
@@ -235,4 +241,126 @@ export function pickPeaks(curve: RefCurve, count = 6, minSepMs = 0.6): RefPeak[]
     out.push({ ms: curve.startMs + ((c.i + frac) / curve.sampleRate) * 1000, strength: c.h / noise });
   }
   return out;
+}
+
+
+// ==================== following two speakers by their learned echo patterns ====================
+
+export interface SpeakerFit {
+  /** Where each speaker's direct sound is now, in ms on the curve's axis */
+  aMs: number;
+  bMs: number;
+  /** How clearly each one stands out (correlation peak over its background) */
+  strengthA: number;
+  strengthB: number;
+}
+
+const FIT_N = 32768;
+
+/**
+ * Each speaker alone leaves a characteristic pattern on the lag curve: a direct peak followed by its room's
+ * echoes. With both playing, the curve is the two patterns added, each shifted by that speaker's delay. So
+ * instead of guessing which peak is which, slide each learned pattern along the curve and take the shift
+ * that matches best (A first, take it out, then B, and once more to refine). This copes with a quiet speaker
+ * hiding under a loud one's echoes and with the two peaks sitting on top of each other.
+ */
+export function fitSpeakers(
+  live: RefCurve,
+  tplA: RefCurve,
+  tplB: RefCurve,
+  limitAMs = 30,
+  limitBMs = 200
+): SpeakerFit {
+  const n = live.values.length;
+  const sr = live.sampleRate;
+  const centre = (v: Float64Array) => {
+    const sorted = Float64Array.from(v).sort();
+    const med = sorted[Math.floor(sorted.length / 2)];
+    return Float64Array.from(v, (x) => x - med);
+  };
+  const L = centre(live.values);
+  /** Template: the learned curve around its strongest peak (direct sound plus the echoes after it) */
+  const makeTemplate = (c: RefCurve) => {
+    const t = centre(c.values);
+    let pk = 0;
+    for (let i = 1; i < t.length; i++) if (t[i] > t[pk]) pk = i;
+    const lo = Math.max(0, pk - Math.round(0.01 * sr));
+    const hi = Math.min(t.length - 1, pk + Math.round(0.06 * sr));
+    const out = new Float64Array(t.length);
+    let energy = 0;
+    for (let i = lo; i <= hi; i++) {
+      out[i] = t[i];
+      energy += t[i] * t[i];
+    }
+    return { t: out, energy: energy || 1, peak: pk };
+  };
+  const A = makeTemplate(tplA);
+  const B = makeTemplate(tplB);
+
+  const re = new Float64Array(FIT_N);
+  const im = new Float64Array(FIT_N);
+  /** Correlation of x with template t at shifts -S..S (returned as a map from shift to value) */
+  const correlate = (x: Float64Array, t: Float64Array, S: number) => {
+    re.fill(0);
+    im.fill(0);
+    re.set(x.subarray(0, Math.min(n, FIT_N)));
+    fft(re, im);
+    const fr = Float64Array.from(re);
+    const fi = Float64Array.from(im);
+    re.fill(0);
+    im.fill(0);
+    re.set(t.subarray(0, Math.min(n, FIT_N)));
+    fft(re, im);
+    const cr = new Float64Array(FIT_N);
+    const ci = new Float64Array(FIT_N);
+    for (let k = 0; k < FIT_N; k++) {
+      cr[k] = fr[k] * re[k] + fi[k] * im[k];
+      ci[k] = fi[k] * re[k] - fr[k] * im[k];
+    }
+    fft(cr, ci, true);
+    const out = new Float64Array(2 * S + 1);
+    for (let s = -S; s <= S; s++) out[s + S] = cr[(s + FIT_N) % FIT_N] / FIT_N;
+    return out;
+  };
+  const best = (c: Float64Array, S: number, energy: number) => {
+    let bi = 0;
+    for (let i = 1; i < c.length; i++) if (c[i] > c[bi]) bi = i;
+    // parabolic refinement
+    let frac = 0;
+    if (bi > 0 && bi < c.length - 1) {
+      const d = c[bi - 1] - 2 * c[bi] + c[bi + 1];
+      if (d !== 0) frac = (0.5 * (c[bi - 1] - c[bi + 1])) / d;
+    }
+    const abs = Float64Array.from(c, Math.abs).sort();
+    const noise = abs[Math.floor(abs.length / 2)] + 1e-12;
+    return { shift: bi - S + frac, gain: c[bi] / energy, strength: c[bi] / noise };
+  };
+  const shifted = (t: Float64Array, s: number, gain: number) => {
+    const out = new Float64Array(n);
+    const k = Math.round(s);
+    for (let i = 0; i < n; i++) {
+      const j = i - k;
+      if (j >= 0 && j < n) out[i] = gain * t[j];
+    }
+    return out;
+  };
+  const SA = Math.round((limitAMs / 1000) * sr);
+  const SB = Math.round((limitBMs / 1000) * sr);
+  let fa = { shift: 0, gain: 0, strength: 0 };
+  let fb = { shift: 0, gain: 0, strength: 0 };
+  for (let iter = 0; iter < 3; iter++) {
+    const bPart = fb.gain ? shifted(B.t, fb.shift, fb.gain) : null;
+    const withoutB = bPart ? Float64Array.from(L, (x, i) => x - bPart[i]) : L;
+    fa = best(correlate(withoutB, A.t, SA), SA, A.energy);
+    const aPart = shifted(A.t, fa.shift, fa.gain);
+    const withoutA = Float64Array.from(L, (x, i) => x - aPart[i]);
+    fb = best(correlate(withoutA, B.t, SB), SB, B.energy);
+  }
+  const ms = (idx: number) => live.startMs + (idx / sr) * 1000;
+  return {
+    aMs: ms(A.peak + fa.shift),
+    bMs: ms(B.peak + fb.shift),
+    strengthA: fa.strength,
+    strengthB: fb.strength,
+  };
 }

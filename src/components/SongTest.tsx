@@ -193,7 +193,7 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
       )}
 
       {(learned.A !== undefined || learned.B !== undefined) && (
-        <p className="text-xs text-text-muted text-center">
+        <p className="text-sm text-center">
           Alone: {a.name} {learned.A?.toFixed(2) ?? '–'} ms · {b.name} {learned.B?.toFixed(2) ?? '–'} ms
           {learned.A !== undefined && learned.B !== undefined && ` · gap ${(learned.B - learned.A).toFixed(2)} ms`}
         </p>
