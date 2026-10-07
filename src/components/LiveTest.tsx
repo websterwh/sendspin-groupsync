@@ -168,6 +168,8 @@ function Run({
   const stageText =
     stage === 'waiting'
       ? 'Play music on the speakers (Spotify Connect, a song, anything)'
+      : stage === 'levels'
+        ? 'Checking how loud each speaker is, and matching them…'
       : stage === 'learn_a'
         ? `Learning the room, 1 of 2: only ${a.name} plays`
         : stage === 'learn_b'
@@ -215,7 +217,7 @@ function Run({
                       : learn.state === 'flat'
                         ? 'Got it (very little echo here)'
                         : learn.state === 'loose'
-                          ? "Never fully settled, using what it heard"
+                          ? "Never fully settled, using what it heard (a quiet speaker or very plain music is the usual cause)"
                           : "Couldn't hear enough music to learn this"
                   : 'Starting…'}
               </p>
@@ -226,7 +228,7 @@ function Run({
               Level at the phone: {a.name} {levels.aDb.toFixed(0)} dB · {b.name} {levels.bDb.toFixed(0)} dB
             </p>
           )}
-          {volumeNote && learning && <p className="text-xs text-text-muted">{volumeNote.text}</p>}
+          {volumeNote && (learning || stage === 'levels') && <p className="text-xs text-text-muted">{volumeNote.text}</p>}
           {stage === 'waiting' && (
             <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
               <div className="h-full bg-green-500" style={{ width: `${Math.min(100, level * 2000)}%`, transition: 'width 300ms' }} />

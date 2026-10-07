@@ -34,7 +34,7 @@ export interface LiveRoom {
   volume?: number;
 }
 
-export type LiveStage = 'waiting' | 'learn_a' | 'learn_b' | 'live';
+export type LiveStage = 'waiting' | 'levels' | 'learn_a' | 'learn_b' | 'live';
 
 export interface LiveReading {
   /** Seconds since the live stage began */
@@ -260,13 +260,31 @@ export class LiveDriftSession {
   private async learnRoom(): Promise<void> {
     this.curveA = this.curveB = null;
 
+    // Level the speakers first: a quiet speaker takes much longer to learn (or never settles), so the
+    // volumes are matched before the room is learned, not after
+    let failA: string[] = [];
+    let failB: string[] = [];
+    if (this.opts.matchVolume && !this.skipBaseline) {
+      this.setStage('levels');
+      failA = await this.setMutes([this.b, ...this.others]);
+      const eA0 = await this.listenForLevel();
+      failB = await this.setMutes([this.a, ...this.others]);
+      const eB0 = await this.listenForLevel();
+      if (eA0 !== null && eB0 !== null && this.running && !this.skipBaseline) {
+        this.emit({ type: 'levels', data: { aDb: 10 * Math.log10(eA0 + 1e-12), bDb: 10 * Math.log10(eB0 + 1e-12) } satisfies LiveLevels });
+        const [eA1, eB1] = await this.matchVolumes(eA0, eB0);
+        await this.warnIfQuiet(eA1, eB1);
+      }
+    }
+    if (!this.running || this.skipBaseline) return;
+
     this.setStage('learn_a');
-    const failA = await this.setMutes([this.b, ...this.others]);
+    failA = await this.setMutes([this.b, ...this.others]);
     const a = await this.learnSpeaker('A');
     if (!a || !this.running || this.skipBaseline) return;
 
     this.setStage('learn_b');
-    const failB = await this.setMutes([this.a, ...this.others]);
+    failB = await this.setMutes([this.a, ...this.others]);
     const b = await this.learnSpeaker('B');
     if (!b || !this.running || this.skipBaseline) return;
 
@@ -276,14 +294,8 @@ export class LiveDriftSession {
 
     this.curveA = a.curve;
     this.curveB = b.curve;
-    let eA = a.energy;
-    let eB = b.energy;
-    this.emit({ type: 'levels', data: { aDb: 10 * Math.log10(eA + 1e-12), bDb: 10 * Math.log10(eB + 1e-12) } satisfies LiveLevels });
-    if (this.opts.matchVolume && !this.skipBaseline) {
-      [eA, eB] = await this.matchVolumes(eA, eB);
-    }
-    this.weights = [(BASELINE_SHARE * eA) / (eA + eB || 1), (BASELINE_SHARE * eB) / (eA + eB || 1)];
-    await this.warnIfQuiet(eA, eB);
+    this.weights = [(BASELINE_SHARE * a.energy) / (a.energy + b.energy || 1), (BASELINE_SHARE * b.energy) / (a.energy + b.energy || 1)];
+    if (!this.opts.matchVolume) await this.warnIfQuiet(a.energy, b.energy);
   }
 
   /** Say so when a speaker is barely heard (or far quieter than the other), with what Music Assistant shows for it */
