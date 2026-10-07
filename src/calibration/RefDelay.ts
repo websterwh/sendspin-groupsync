@@ -12,10 +12,10 @@
  */
 import { fft } from './LiveDelay';
 
-export const REF_FRAME = 32768;
+export const REF_FRAME = 65536;
 /** Lags examined around the aligned position, in ms (sound can only arrive after it left, plus a margin) */
-export const LAG_MIN_MS = -40;
-export const LAG_MAX_MS = 260;
+export const LAG_MIN_MS = -300;
+export const LAG_MAX_MS = 300;
 const BAND_LO_HZ = 150;
 const BAND_HI_HZ = 9000;
 
@@ -255,7 +255,7 @@ export interface SpeakerFit {
   strengthB: number;
 }
 
-const FIT_N = 32768;
+const FIT_N = 65536;
 
 /**
  * Each speaker alone leaves a characteristic pattern on the lag curve: a direct peak followed by its room's
@@ -268,8 +268,8 @@ export function fitSpeakers(
   live: RefCurve,
   tplA: RefCurve,
   tplB: RefCurve,
-  limitAMs = 30,
-  limitBMs = 200
+  limitAMs = 100,
+  limitBMs = 320
 ): SpeakerFit {
   const n = live.values.length;
   const sr = live.sampleRate;

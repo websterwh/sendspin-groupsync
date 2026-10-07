@@ -56,8 +56,8 @@ export interface SongEvent {
   data?: unknown;
 }
 
-const ALIGN_MARGIN = 2400; // song frames start 50 ms later than the estimate so early lags are in range
-const LEARN_MIN_FRAMES = 5;
+const ALIGN_MARGIN = 0; // the speaker heard while finding the song sits at lag 0; the window reaches 300 ms either side
+const LEARN_MIN_FRAMES = 4;
 const LEARN_MAX_S = 25;
 const MUTE_GUARD_S = 3;
 const MIN_PEAK_STRENGTH = 12;
@@ -358,7 +358,11 @@ export class SongSession {
             `${mine.name} is barely audible at the phone (${levelDb!.toFixed(0)} dB above the room noise). Turn its volume up or move the phone closer, then try again.`
           );
         }
-        throw new Error(`Couldn't get a clear reading of ${mine.name} (best peak ${last ? last.strength.toFixed(0) : 0}, needs ${LEARN_STRENGTH}). ${await this.diagnose()}`);
+        throw new Error(
+          `Couldn't get a clear reading of ${mine.name} (best peak ${last ? last.strength.toFixed(0) : 0}, needs ${LEARN_STRENGTH}).` +
+            (levelDb !== null && levelDb >= 10 ? ` It is loud enough, so it may be more than 0.3 s away from the other speaker: get the two closer first.` : '') +
+            ` ${await this.diagnose()}`
+        );
       }
     }
     throw new Error('Stopped');
