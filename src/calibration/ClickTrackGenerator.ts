@@ -44,7 +44,6 @@ export class ClickTrackGenerator {
     const intervalSamples = Math.floor((clickInterval / 1000) * sampleRate);
     const numClicks = Math.floor(totalDuration * 1000 / clickInterval);
 
-    console.log(`[ClickTrack] Generating ${numClicks} clicks, ${clickSamples} samples each`);
 
     for (let clickIndex = 0; clickIndex < numClicks; clickIndex++) {
       const startSample = clickIndex * intervalSamples;

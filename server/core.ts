@@ -295,7 +295,6 @@ export function createGroupSyncCore(options: CoreOptions) {
       songStats.lastAt = Date.now();
       songStats.lastIp = (req.socket.remoteAddress ?? '').replace('::ffff:', '');
       songStats.lastName = name;
-      console.log(`[groupsync] ${songStats.lastIp} requested song "${name}" ${req.headers.range ?? ''}`);
     }
     const file = path.join(musicDir, name);
     const size = fs.statSync(file).size;
@@ -322,16 +321,6 @@ export function createGroupSyncCore(options: CoreOptions) {
     }
     res.setHeader('Content-Length', end - start + 1);
     if (req.method === 'HEAD') return res.end();
-    if (fromPlayer) {
-      let sent = 0;
-      res.on('close', () =>
-        console.log(`[groupsync] song request ${start}-${end}: sent ${sent} of ${end - start + 1} bytes${res.writableFinished ? '' : ' (the player closed the connection early)'}`)
-      );
-      const stream = fs.createReadStream(file, { start, end });
-      stream.on('data', (c) => (sent += c.length));
-      stream.pipe(res);
-      return;
-    }
     fs.createReadStream(file, { start, end }).pipe(res);
   };
 

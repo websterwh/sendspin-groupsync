@@ -77,7 +77,6 @@ export function ConnectionPanel() {
     setLoading(true);
     try {
       const players = await maClient.getAllPlayers();
-      console.log('[MA] Found players:', players.length, players);
       // Show all available players - user can select which ones to calibrate
       setPlayers(players);
       return true;

@@ -144,7 +144,10 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const gap = reading?.gapMs ?? null;
+  // The number and the graph follow a lightly smoothed gap (median of three, then a quick moving average that
+  // jumps straight to a new level when the gap really changes)
+  const smooth = useMemo(() => smoothGaps(history), [history]);
+  const gap = reading?.gapMs == null ? null : (smooth[smooth.length - 1]?.s ?? reading.gapMs);
   const later = gap === null ? null : gap > 0 ? b.name : a.name;
   const earlier = gap === null ? null : gap > 0 ? a.name : b.name;
   const abs = gap === null ? null : Math.abs(gap);
@@ -213,7 +216,7 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
       )}
 
       {reading && <CurveChart reading={reading} />}
-      {history.length > 2 && <GapHistory history={history} />}
+      {history.length > 2 && <GapHistory history={history} smooth={smooth} />}
 
       {stage === 'live' && !stopped && !error && (
         <div className="space-y-2">
@@ -325,7 +328,27 @@ function CurveChart({ reading }: { reading: SongReading }) {
   );
 }
 
-function GapHistory({ history }: { history: { t: number; gap: number | null }[] }) {
+/** Smoothed gap per reading (null where there was no reading) */
+function smoothGaps(history: { t: number; gap: number | null }[]): { t: number; s: number | null }[] {
+  const out: { t: number; s: number | null }[] = [];
+  let ema: number | null = null;
+  for (let i = 0; i < history.length; i++) {
+    const g = history[i].gap;
+    if (g === null) {
+      out.push({ t: history[i].t, s: null });
+      ema = null;
+      continue;
+    }
+    const window = [history[i - 2]?.gap, history[i - 1]?.gap, g].filter((v): v is number => v != null).sort((x, y) => x - y);
+    const med = window[Math.floor(window.length / 2)];
+    // a real change (more than 2 ms and 20%) is followed at once, small wobble is averaged out
+    ema = ema === null || Math.abs(med - ema) > Math.max(2, 0.2 * Math.abs(ema)) ? med : ema + 0.5 * (med - ema);
+    out.push({ t: history[i].t, s: ema });
+  }
+  return out;
+}
+
+function GapHistory({ history, smooth }: { history: { t: number; gap: number | null }[]; smooth: { t: number; s: number | null }[] }) {
   const vals = history.filter((h) => h.gap !== null).map((h) => h.gap as number);
   if (vals.length < 2) return null;
   const lo = Math.min(...vals, 0);
@@ -334,13 +357,28 @@ function GapHistory({ history }: { history: { t: number; gap: number | null }[] 
   const t1 = history[history.length - 1].t;
   const px = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * 100;
   const py = (g: number) => 28 - ((g - lo) / (hi - lo || 1)) * 26;
+  // one line per unbroken run of readings
+  const runs: string[] = [];
+  let run: string[] = [];
+  for (const p of smooth) {
+    if (p.s === null) {
+      if (run.length > 1) runs.push(run.join(' '));
+      run = [];
+    } else {
+      run.push(`${px(p.t).toFixed(2)},${py(p.s).toFixed(2)}`);
+    }
+  }
+  if (run.length > 1) runs.push(run.join(' '));
   return (
     <div>
       <svg viewBox="0 0 100 30" className="w-full h-20 bg-surface rounded" preserveAspectRatio="none">
         <line x1="0" x2="100" y1={py(0)} y2={py(0)} stroke="#6b7280" strokeWidth="0.4" vectorEffect="non-scaling-stroke" />
-        {history.map((h, i) => (h.gap === null ? null : <circle key={i} cx={px(h.t)} cy={py(h.gap)} r="0.7" fill="#38bdf8" />))}
+        {history.map((h, i) => (h.gap === null ? null : <circle key={i} cx={px(h.t)} cy={py(h.gap)} r="0.4" fill="#38bdf8" opacity="0.35" />))}
+        {runs.map((pts, i) => (
+          <polyline key={i} points={pts} fill="none" stroke="#38bdf8" strokeWidth="1.2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        ))}
       </svg>
-      <p className="text-xs text-text-muted text-center">Gap over time (above the line: second speaker later)</p>
+      <p className="text-xs text-text-muted text-center">Gap over time, smoothed (above the line: second speaker later)</p>
     </div>
   );
 }

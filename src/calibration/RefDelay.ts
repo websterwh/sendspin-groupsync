@@ -175,13 +175,15 @@ export class RefTracker {
   /**
    * Add one frame. `mic` and `song` are the same length (REF_FRAME) and already aligned, i.e. `song`
    * is the part of the song that should be playing during `mic`, with a margin for the lags examined.
+   * `hopS` is how many seconds later this frame starts than the previous one (default: the frame length).
    */
-  push(mic: Float32Array, song: Float32Array): void {
+  push(mic: Float32Array, song: Float32Array, hopS?: number): void {
     const N = this.N;
     const M = spectrum(mic, 0, N);
     const S = spectrum(song, 0, N);
-    const frameS = N / this.sr;
-    const keep = this.acc ? Math.exp(-frameS / this.memoryS) : 0;
+    // Frames may overlap: forgetting follows how far time moved on since the last frame, not the frame length
+    const stepS = hopS ?? N / this.sr;
+    const keep = this.acc ? Math.exp(-stepS / this.memoryS) : 0;
     if (!this.acc) this.acc = { re: new Float64Array(N), im: new Float64Array(N), pm: new Float64Array(N), ps: new Float64Array(N) };
     const a = this.acc;
     // Cross-spectrum and the two power spectra, summed over frames. Normalising once at the end by the
@@ -264,6 +266,41 @@ const FIT_N = 65536;
  * that matches best (A first, take it out, then B, and once more to refine). This copes with a quiet speaker
  * hiding under a loud one's echoes and with the two peaks sitting on top of each other.
  */
+interface PreparedTemplate {
+  t: Float64Array;
+  energy: number;
+  peak: number;
+  fr: Float64Array;
+  fi: Float64Array;
+}
+const preparedTemplates = new WeakMap<RefCurve, PreparedTemplate>();
+
+function prepareTemplate(c: RefCurve): PreparedTemplate {
+  const cached = preparedTemplates.get(c);
+  if (cached) return cached;
+  const sr = c.sampleRate;
+  const sorted = Float64Array.from(c.values).sort();
+  const med = sorted[Math.floor(sorted.length / 2)];
+  const centred = Float64Array.from(c.values, (x) => x - med);
+  let pk = 0;
+  for (let i = 1; i < centred.length; i++) if (centred[i] > centred[pk]) pk = i;
+  const lo = Math.max(0, pk - Math.round(0.01 * sr));
+  const hi = Math.min(centred.length - 1, pk + Math.round(0.06 * sr));
+  const t = new Float64Array(centred.length);
+  let energy = 0;
+  for (let i = lo; i <= hi; i++) {
+    t[i] = centred[i];
+    energy += centred[i] * centred[i];
+  }
+  const fr = new Float64Array(FIT_N);
+  const fi = new Float64Array(FIT_N);
+  fr.set(t.subarray(0, Math.min(t.length, FIT_N)));
+  fft(fr, fi);
+  const out = { t, energy: energy || 1, peak: pk, fr, fi };
+  preparedTemplates.set(c, out);
+  return out;
+}
+
 export function fitSpeakers(
   live: RefCurve,
   tplA: RefCurve,
@@ -273,59 +310,34 @@ export function fitSpeakers(
 ): SpeakerFit {
   const n = live.values.length;
   const sr = live.sampleRate;
-  const centre = (v: Float64Array) => {
-    const sorted = Float64Array.from(v).sort();
-    const med = sorted[Math.floor(sorted.length / 2)];
-    return Float64Array.from(v, (x) => x - med);
-  };
-  const L = centre(live.values);
-  /** Template: the learned curve around its strongest peak (direct sound plus the echoes after it) */
-  const makeTemplate = (c: RefCurve) => {
-    const t = centre(c.values);
-    let pk = 0;
-    for (let i = 1; i < t.length; i++) if (t[i] > t[pk]) pk = i;
-    const lo = Math.max(0, pk - Math.round(0.01 * sr));
-    const hi = Math.min(t.length - 1, pk + Math.round(0.06 * sr));
-    const out = new Float64Array(t.length);
-    let energy = 0;
-    for (let i = lo; i <= hi; i++) {
-      out[i] = t[i];
-      energy += t[i] * t[i];
-    }
-    return { t: out, energy: energy || 1, peak: pk };
-  };
-  const A = makeTemplate(tplA);
-  const B = makeTemplate(tplB);
+  const sorted = Float64Array.from(live.values).sort();
+  const liveMed = sorted[Math.floor(sorted.length / 2)];
+  const L = Float64Array.from(live.values, (x) => x - liveMed);
+  const A = prepareTemplate(tplA);
+  const B = prepareTemplate(tplB);
 
   const re = new Float64Array(FIT_N);
   const im = new Float64Array(FIT_N);
-  /** Correlation of x with template t at shifts -S..S (returned as a map from shift to value) */
-  const correlate = (x: Float64Array, t: Float64Array, S: number) => {
+  /** Correlation of x with a template at shifts -S..S */
+  const correlate = (x: Float64Array, tpl: PreparedTemplate, S: number) => {
     re.fill(0);
     im.fill(0);
     re.set(x.subarray(0, Math.min(n, FIT_N)));
     fft(re, im);
-    const fr = Float64Array.from(re);
-    const fi = Float64Array.from(im);
-    re.fill(0);
-    im.fill(0);
-    re.set(t.subarray(0, Math.min(n, FIT_N)));
-    fft(re, im);
-    const cr = new Float64Array(FIT_N);
-    const ci = new Float64Array(FIT_N);
     for (let k = 0; k < FIT_N; k++) {
-      cr[k] = fr[k] * re[k] + fi[k] * im[k];
-      ci[k] = fi[k] * re[k] - fr[k] * im[k];
+      const xr = re[k];
+      const xi = im[k];
+      re[k] = xr * tpl.fr[k] + xi * tpl.fi[k];
+      im[k] = xi * tpl.fr[k] - xr * tpl.fi[k];
     }
-    fft(cr, ci, true);
+    fft(re, im, true);
     const out = new Float64Array(2 * S + 1);
-    for (let s = -S; s <= S; s++) out[s + S] = cr[(s + FIT_N) % FIT_N] / FIT_N;
+    for (let s = -S; s <= S; s++) out[s + S] = re[(s + FIT_N) % FIT_N] / FIT_N;
     return out;
   };
   const best = (c: Float64Array, S: number, energy: number) => {
     let bi = 0;
     for (let i = 1; i < c.length; i++) if (c[i] > c[bi]) bi = i;
-    // parabolic refinement
     let frac = 0;
     if (bi > 0 && bi < c.length - 1) {
       const d = c[bi - 1] - 2 * c[bi] + c[bi + 1];
@@ -348,13 +360,13 @@ export function fitSpeakers(
   const SB = Math.round((limitBMs / 1000) * sr);
   let fa = { shift: 0, gain: 0, strength: 0 };
   let fb = { shift: 0, gain: 0, strength: 0 };
-  for (let iter = 0; iter < 3; iter++) {
+  for (let iter = 0; iter < 2; iter++) {
     const bPart = fb.gain ? shifted(B.t, fb.shift, fb.gain) : null;
     const withoutB = bPart ? Float64Array.from(L, (x, i) => x - bPart[i]) : L;
-    fa = best(correlate(withoutB, A.t, SA), SA, A.energy);
+    fa = best(correlate(withoutB, A, SA), SA, A.energy);
     const aPart = shifted(A.t, fa.shift, fa.gain);
     const withoutA = Float64Array.from(L, (x, i) => x - aPart[i]);
-    fb = best(correlate(withoutA, B.t, SB), SB, B.energy);
+    fb = best(correlate(withoutA, B, SB), SB, B.energy);
   }
   const ms = (idx: number) => live.startMs + (idx / sr) * 1000;
   return {

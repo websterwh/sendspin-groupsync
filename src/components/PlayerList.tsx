@@ -109,7 +109,6 @@ export function PlayerList({ variant = 'click', onBack, onStart }: Props) {
                 <button
                   key={player.player_id}
                   onClick={() => {
-                    console.log('[UI] Tapped player:', player.player_id, player.name);
                     handleToggle(player.player_id);
                   }}
                   disabled={!isAvailable}

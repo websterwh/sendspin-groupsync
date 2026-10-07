@@ -152,7 +152,6 @@ export class CalibrationSession {
 
       // Plain-HTTP URL on this machine's LAN IP (served by the dev server) so MA can fetch it
       const clickTrackUrl = await resolveClickTrackUrl(this.serverUrl, this.trackSeconds);
-      console.log('[CalibrationSession] Click track URL:', clickTrackUrl);
 
       await maClient.playMedia(this.queueId, clickTrackUrl, 'replace');
       this.playing = true;
@@ -256,7 +255,6 @@ export class CalibrationSession {
     try {
       await this.stopPlayback();
       const analysis = this.analyze();
-      console.log('[CalibrationSession] Analysis:', analysis);
 
       const results: CalibrationResult[] = [];
       for (const room of analysis.rooms) {

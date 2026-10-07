@@ -412,6 +412,7 @@ export class SongSession {
     const sr = this.recorder.sampleRate;
     const frameS = REF_FRAME / sr;
     const tracker = new RefTracker(sr, this.memoryS);
+    const hopS = frameS / 2;
     this.tracker = tracker;
     this.recent = [];
     this.refStrA = this.refStrB = this.refCount = this.weakRun = 0;
@@ -430,14 +431,15 @@ export class SongSession {
         continue;
       }
       let pushed = false;
+      // Overlapping frames (half a frame apart) give a new reading about every 0.7 s instead of every 1.4 s
       while (at + frameS <= now) {
         const f = this.frame(at);
-        tracker.push(f.mic, f.song);
-        at += frameS;
+        tracker.push(f.mic, f.song, hopS);
+        at += hopS;
         pushed = true;
       }
       if (!pushed) continue;
-      const curve = tracker.curve(2);
+      const curve = tracker.curve(3);
       if (curve) this.emit({ type: 'reading', data: this.reading(curve, now - began - MUTE_GUARD_S) });
     }
     this.relearn = false;

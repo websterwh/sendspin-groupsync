@@ -228,6 +228,8 @@ export class LagCurveTracker {
   private readonly prefix: Float64Array;
   private acc: Float64Array;
   private weight = 0;
+  /** Running average of frame loudness, so loud passages can count for more than quiet ones */
+  private meanEnergy = 0;
   private buffer = new Float32Array(0);
   private decay: number;
   /** Frames folded into the running average since the last reset (not faded) */
@@ -264,6 +266,7 @@ export class LagCurveTracker {
   reset(): void {
     this.acc.fill(0);
     this.weight = 0;
+    this.meanEnergy = 0;
     this.frames = 0;
     this.buffer = new Float32Array(0);
   }
@@ -309,8 +312,12 @@ export class LagCurveTracker {
       const b = Math.min(N / 2, k + this.halfWin);
       frame[k] = power[k] / ((prefix[b + 1] - prefix[a]) / (b - a + 1) + 1e-18);
     }
-    for (let k = this.kLo; k <= this.kHi; k++) this.acc[k] = this.acc[k] * this.decay + frame[k];
-    this.weight = this.weight * this.decay + 1;
+    // Each frame's pattern is already evened out; weight it by how loud it was compared with the usual,
+    // so a quiet passage (mostly room noise) can't outvote the music
+    this.meanEnergy = this.meanEnergy === 0 ? energy : 0.98 * this.meanEnergy + 0.02 * energy;
+    const w = Math.min(1.5, Math.max(0.15, Math.sqrt(energy / this.meanEnergy)));
+    for (let k = this.kLo; k <= this.kHi; k++) this.acc[k] = this.acc[k] * this.decay + w * frame[k];
+    this.weight = this.weight * this.decay + w;
     this.frames++;
     return true;
   }

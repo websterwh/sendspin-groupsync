@@ -79,7 +79,6 @@ export class MicRecorder {
     this.context = new AudioContext();
     if (this.context.state === 'suspended') await this.context.resume();
     const source = this.context.createMediaStreamSource(this.stream);
-    console.log('[MicRecorder] Sample rate:', this.context.sampleRate);
 
     const onChunk = (frame: number, data: Float32Array) => {
       if (this.firstFrame === null) this.firstFrame = frame;

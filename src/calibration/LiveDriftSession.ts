@@ -52,11 +52,13 @@ export interface LiveReading {
   candidates: DelayPeak[];
   /** A small gap that was seen but not clear enough to report (null if none) */
   weakSmall: DelayPeak | null;
+  /** The room sounds quite different from when it was learned (the phone or a speaker has probably moved) */
+  roomChanged: boolean;
   /** The gap curve behind this reading (strength per delay), coarsely sampled for display */
   curve: { startMs: number; endMs: number; values: number[]; raw: number[] };
 }
 
-export type LiveEventType = 'stage' | 'reading' | 'mute_problems' | 'level' | 'levels' | 'volume' | 'learn' | 'error';
+export type LiveEventType = 'stage' | 'reading' | 'mute_problems' | 'level' | 'levels' | 'volume' | 'learn' | 'warning' | 'error';
 export interface LiveEvent {
   type: LiveEventType;
   data?: unknown;
@@ -146,6 +148,9 @@ export class LiveDriftSession {
   private curveA: LagCurve | null = null;
   private curveB: LagCurve | null = null;
   private weights: number[] = [0.5, 0.5];
+  private fitRef = 0;
+  private fitCount = 0;
+  private lowFit = 0;
   private liveStart = 0;
   private relearn = false;
   private resetWindow = false;
@@ -278,6 +283,32 @@ export class LiveDriftSession {
       [eA, eB] = await this.matchVolumes(eA, eB);
     }
     this.weights = [(BASELINE_SHARE * eA) / (eA + eB || 1), (BASELINE_SHARE * eB) / (eA + eB || 1)];
+    await this.warnIfQuiet(eA, eB);
+  }
+
+  /** Say so when a speaker is barely heard (or far quieter than the other), with what Music Assistant shows for it */
+  private async warnIfQuiet(eA: number, eB: number): Promise<void> {
+    const aDb = 10 * Math.log10(eA + 1e-12);
+    const bDb = 10 * Math.log10(eB + 1e-12);
+    const quiet = aDb <= bDb ? this.a : this.b;
+    const floorDb = 20 * Math.log10(MUSIC_LEVEL / 2);
+    const tooQuiet = Math.min(aDb, bDb) < floorDb;
+    const lopsided = Math.abs(aDb - bDb) > 15;
+    if (!tooQuiet && !lopsided) return;
+    let detail = '';
+    try {
+      const p = await maClient.getPlayer(quiet.playerId);
+      const bits: string[] = [];
+      if (p.volume_muted ?? p.muted) bits.push('muted');
+      if (typeof p.volume_level === 'number') bits.push(`volume ${p.volume_level}`);
+      if (bits.length) detail = ` Music Assistant shows ${quiet.name} as ${bits.join(', ')}.`;
+    } catch {
+      // no extra detail
+    }
+    this.emit({
+      type: 'warning',
+      data: `${quiet.name} is ${tooQuiet ? 'barely audible' : `${Math.abs(aDb - bDb).toFixed(0)} dB quieter than the other speaker`} at the phone. Turn it up or move the phone closer for a better reading.${detail}`,
+    });
   }
 
   /**
@@ -359,6 +390,7 @@ export class LiveDriftSession {
     await this.setMutes([...this.others]);
     const tracker = new LagCurveTracker(sr, { memoryS: this.opts.memoryS });
     this.tracker = tracker;
+    this.fitRef = this.fitCount = this.lowFit = 0;
     // Audio is fed in as it arrives; times are kept on whole samples so chunks join up exactly
     const onSample = (t: number) => Math.floor(t * sr) / sr;
     this.liveStart = onSample(this.recorder.elapsed + guardS);
@@ -387,6 +419,22 @@ export class LiveDriftSession {
       const mix = tracker.curve();
       if (!mix || !this.running) continue;
       const learned = this.curveA && this.curveB;
+      // Does the room still sound like it did when it was learned? The mix should look like the two speakers'
+      // own patterns added up; once that stops holding, the phone (or a speaker) has probably moved.
+      let roomChanged = false;
+      if (learned) {
+        const n = Math.min(this.curveA!.strength.length, this.curveB!.strength.length, mix.strength.length);
+        const expected = new Float64Array(n);
+        for (let i = 0; i < n; i++) expected[i] = this.weights[0] * this.curveA!.strength[i] + this.weights[1] * this.curveB!.strength[i];
+        const fit = curveCorrelation(mix.strength.subarray(0, n), expected);
+        if (this.fitCount < 6) {
+          this.fitRef = Math.max(this.fitRef, fit);
+          this.fitCount++;
+        } else {
+          this.lowFit = fit < 0.5 * this.fitRef ? this.lowFit + 1 : 0;
+          roomChanged = this.lowFit >= 4;
+        }
+      }
       const curve = learned ? subtractBaselines(mix, [this.curveA!, this.curveB!], this.weights) : mix;
       const { peaks } = bestPeak(curve, this.opts.minStrength);
       // Strongest peak that is convincing: small gaps need to be strong and stand clear of the rest
@@ -429,6 +477,7 @@ export class LiveDriftSession {
           usedBaseline: !!learned,
           candidates: peaks.slice(0, 3),
           weakSmall,
+          roomChanged,
           curve: { startMs: lagMs(0), endMs: lagMs(curve.strength.length - 1), values, raw },
         } satisfies LiveReading,
       });

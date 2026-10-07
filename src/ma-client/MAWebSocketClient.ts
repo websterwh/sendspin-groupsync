@@ -74,7 +74,6 @@ export class MAWebSocketClient {
         }, 10000);
 
         this.ws.onopen = () => {
-          console.log('[MA] WebSocket connected, waiting for server info...');
         };
 
         this.ws.onmessage = (event) => {
@@ -87,7 +86,6 @@ export class MAWebSocketClient {
               if (msg.server_id && msg.server_version) {
                 this.serverInfo = msg as ServerInfo;
                 this.initialized = true;
-                console.log('[MA] Server info:', this.serverInfo);
                 clearTimeout(connectionTimeout);
                 this.reconnectAttempts = 0;
                 this.shouldReconnect = true;
@@ -182,7 +180,6 @@ export class MAWebSocketClient {
     });
 
     this.accessToken = result.access_token;
-    console.log('[MA] Got access token, authenticating session...');
 
     // Now authenticate the session with the token
     await this.sendCommand('auth', {
@@ -191,7 +188,6 @@ export class MAWebSocketClient {
     });
 
     this.authenticated = true;
-    console.log('[MA] Authenticated as:', result.user.username);
 
     // Store token for reconnection
     try {
@@ -310,7 +306,6 @@ export class MAWebSocketClient {
         args,
       };
 
-      console.log('[MA] Sending:', command, args);
       this.ws!.send(JSON.stringify(message));
     });
   }
@@ -476,7 +471,6 @@ export class MAWebSocketClient {
   private handleMessage(data: string): void {
     try {
       const message = JSON.parse(data);
-      console.log('[MA] Received:', message);
 
       // Handle response to pending request
       if (message.message_id && this.pendingRequests.has(message.message_id)) {
@@ -522,7 +516,6 @@ export class MAWebSocketClient {
 
       // Handle event
       if (message.event) {
-        console.log('[MA] Event:', message.event, message.data);
         const handlers = this.eventHandlers.get(message.event);
         if (handlers) {
           handlers.forEach((handler) => handler(message));

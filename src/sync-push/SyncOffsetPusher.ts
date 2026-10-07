@@ -65,7 +65,6 @@ async function pushSingleOffset(
       { player_id: setting.configPlayerId, values: { [setting.key]: value } },
       options.timeoutMs
     );
-    console.log(`[SyncPush] Set ${setting.key}=${value} on ${setting.configPlayerId} (${result.playerName})`);
     return { ...base, success: true, method: 'config', appliedOffsetMs: value };
   } catch (error) {
     console.error(`[SyncPush] Failed for ${result.playerName}:`, error);

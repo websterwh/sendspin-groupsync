@@ -68,6 +68,7 @@ function Run({
   const [levels, setLevels] = useState<LiveLevels | null>(null);
   const [learn, setLearn] = useState<LearnProgress | null>(null);
   const [volumeNote, setVolumeNote] = useState<VolumeNote | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [keepVolumes, setKeepVolumes] = useState(false);
   const [speed, setSpeed] = useState(20);
   const [sensitivity, setSensitivity] = useState(12);
@@ -118,6 +119,9 @@ function Run({
       } else if (event.type === 'volume') {
         setVolumeNote(event.data as VolumeNote);
         log.event('volume', { note: event.data });
+      } else if (event.type === 'warning') {
+        setWarning(event.data as string);
+        log.event('warning', { text: event.data });
       } else if (event.type === 'error') {
         setError(event.data as string);
         log.event('error', { message: event.data });
@@ -181,6 +185,12 @@ function Run({
 
       {error && <div className="p-3 bg-red-900/30 border border-red-700 rounded-lg text-red-300 text-sm">{error}</div>}
       <MuteWarning problems={muteProblems} />
+      {warning && <div className="p-3 bg-yellow-900/30 border border-yellow-700 rounded-lg text-yellow-200 text-sm">{warning}</div>}
+      {last?.roomChanged && stage === 'live' && !stopped && (
+        <div className="p-3 bg-yellow-900/30 border border-yellow-700 rounded-lg text-yellow-200 text-sm">
+          The room sounds different from when it was learned (did the phone or a speaker move?). Press Relearn room.
+        </div>
+      )}
 
       {stageText && (
         <div className="p-4 bg-surface rounded-lg text-center space-y-2">
