@@ -104,7 +104,6 @@ export class SongSession {
   private recent: number[] = [];
   private songUrl = '';
   private noiseRms = 0;
-  private nudges = 0;
   private requestsBefore = 0;
 
   constructor(
@@ -154,7 +153,6 @@ export class SongSession {
       this.song = toMono(Array.from({ length: decoded.numberOfChannels }, (_, i) => decoded.getChannelData(i)));
       this.emit({ type: 'info', data: `Song loaded: ${(this.song.length / sr / 60).toFixed(1)} min` });
 
-      await this.mutes.set(new Set([this.b, ...this.others].map((r) => r.playerId)));
       const url = await resolveSongUrl(this.serverUrl, this.songName);
       this.songUrl = url;
       this.requestsBefore = (await getSongStats(this.serverUrl))?.requests ?? 0;
@@ -198,33 +196,6 @@ export class SongSession {
     return parts.join(' ');
   }
 
-  /**
-   * Music Assistant sometimes loads the song and then sits idle (the Shield shows the title for a second
-   * and stops). Pressing play by hand fixes it, so do the same when the player isn't playing.
-   */
-  private async nudgePlayback(): Promise<void> {
-    if (this.nudges >= 4) return;
-    let state = '';
-    try {
-      const p = await maClient.getPlayer(this.queueId);
-      state = p.playback_state ?? p.state ?? '';
-    } catch {
-      return;
-    }
-    if (state === 'playing') return;
-    this.nudges++;
-    this.emit({ type: 'info', data: `The player is "${state || 'not playing'}", pressing play…` });
-    try {
-      await maClient.sendCommand('player_queues/play', { queue_id: this.queueId });
-    } catch {
-      try {
-        await maClient.playerCommand(this.queueId, 'play');
-      } catch (error) {
-        console.warn('[SongSession] Could not press play:', error);
-      }
-    }
-  }
-
   /** Wait until the song is audible, then locate it in the recording */
   private async findSong(playedAt: number): Promise<void> {
     this.setStage('finding');
@@ -238,7 +209,6 @@ export class SongSession {
       if (now - lastNote >= 5) {
         lastNote = now;
         this.emit({ type: 'info', data: `Waiting for the song… ${await this.diagnose()}` });
-        await this.nudgePlayback();
       }
       if (now - playedAt > FIND_TIMEOUT_S) {
         throw new Error(`Couldn't hear the song. ${await this.diagnose()}`);
