@@ -46,6 +46,8 @@ export interface SongLearn {
   ms: number | null;
   strength: number;
   stable: boolean;
+  /** How far above the room's background noise this speaker is at the phone, in dB */
+  levelDb: number | null;
 }
 
 export type SongEventType = 'stage' | 'reading' | 'learn' | 'mute_problems' | 'level' | 'info' | 'error';
@@ -59,11 +61,21 @@ const LEARN_MIN_FRAMES = 5;
 const LEARN_MAX_S = 25;
 const MUTE_GUARD_S = 3;
 const MIN_PEAK_STRENGTH = 12;
+/** A speaker's own peak must reach this before it is accepted while learning (noise peaks stay lower) */
+const LEARN_STRENGTH = 18;
+/** Quieter than this above the room noise and the speaker can't be measured */
+const MIN_LEVEL_DB = 6;
 /** A real match shows a peak far above this in the detailed comparison (simulated ones are 100+, noise stays below 20) */
 const CONFIRM_STRENGTH = 30;
 const LABEL_WINDOW_MS = 20;
 const RECENTRE_MS = 25;
 const FIND_TIMEOUT_S = 60;
+
+const rms = (x: Float32Array) => {
+  let e = 0;
+  for (let i = 0; i < x.length; i++) e += x[i] * x[i];
+  return Math.sqrt(e / Math.max(1, x.length));
+};
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -91,6 +103,8 @@ export class SongSession {
   private patternA: number[] = [];
   private recent: number[] = [];
   private songUrl = '';
+  private noiseRms = 0;
+  private nudges = 0;
   private requestsBefore = 0;
 
   constructor(
@@ -133,6 +147,9 @@ export class SongSession {
       this.setStage('starting');
       await this.recorder.start();
       const sr = this.recorder.sampleRate;
+      // Room noise before anything plays: speakers must stand clearly above it
+      await sleep(1600);
+      this.noiseRms = rms(this.recorder.getSamples(0.4, 1.5));
       const decoded = await new OfflineAudioContext(1, 1, sr).decodeAudioData(await fetchSong(this.songName));
       this.song = toMono(Array.from({ length: decoded.numberOfChannels }, (_, i) => decoded.getChannelData(i)));
       this.emit({ type: 'info', data: `Song loaded: ${(this.song.length / sr / 60).toFixed(1)} min` });
@@ -181,6 +198,33 @@ export class SongSession {
     return parts.join(' ');
   }
 
+  /**
+   * Music Assistant sometimes loads the song and then sits idle (the Shield shows the title for a second
+   * and stops). Pressing play by hand fixes it, so do the same when the player isn't playing.
+   */
+  private async nudgePlayback(): Promise<void> {
+    if (this.nudges >= 4) return;
+    let state = '';
+    try {
+      const p = await maClient.getPlayer(this.queueId);
+      state = p.playback_state ?? p.state ?? '';
+    } catch {
+      return;
+    }
+    if (state === 'playing') return;
+    this.nudges++;
+    this.emit({ type: 'info', data: `The player is "${state || 'not playing'}", pressing play…` });
+    try {
+      await maClient.sendCommand('player_queues/play', { queue_id: this.queueId });
+    } catch {
+      try {
+        await maClient.playerCommand(this.queueId, 'play');
+      } catch (error) {
+        console.warn('[SongSession] Could not press play:', error);
+      }
+    }
+  }
+
   /** Wait until the song is audible, then locate it in the recording */
   private async findSong(playedAt: number): Promise<void> {
     this.setStage('finding');
@@ -194,6 +238,7 @@ export class SongSession {
       if (now - lastNote >= 5) {
         lastNote = now;
         this.emit({ type: 'info', data: `Waiting for the song… ${await this.diagnose()}` });
+        await this.nudgePlayback();
       }
       if (now - playedAt > FIND_TIMEOUT_S) {
         throw new Error(`Couldn't hear the song. ${await this.diagnose()}`);
@@ -260,16 +305,24 @@ export class SongSession {
     const frameS = REF_FRAME / this.recorder.sampleRate;
     const tops: number[] = [];
     let last: { ms: number; strength: number; pattern: number[] } | null = null;
+    let levelDb: number | null = null;
     while (this.running) {
       await sleep(400);
       this.emit({ type: 'level', data: this.recorder.level });
       const now = this.recorder.elapsed;
+      let added = false;
       while (at + frameS <= now) {
         const f = this.frame(at);
         tracker.push(f.mic, f.song);
         at += frameS;
+        added = true;
       }
-      const curve = tracker.curve(2);
+      const heard = now - (began + MUTE_GUARD_S);
+      if (heard > 1.5) {
+        const r = rms(this.recorder.getSamples(now - 1.5, now));
+        levelDb = 20 * Math.log10((r + 1e-9) / (this.noiseRms + 1e-9));
+      }
+      const curve = added ? tracker.curve(2) : null;
       const found = curve ? pickPeaks(curve, 8) : [];
       const top = found[0];
       if (top) {
@@ -277,19 +330,26 @@ export class SongSession {
         last = { ms: top.ms, strength: top.strength, pattern };
         tops.push(top.ms);
       }
+      // Settled: the same peak, strong, over the last four frames
+      const recentTops = tops.slice(-4);
       const settled =
         tracker.frames >= LEARN_MIN_FRAMES &&
-        tops.length >= 3 &&
-        Math.max(...tops.slice(-3)) - Math.min(...tops.slice(-3)) < 0.3 &&
-        (last?.strength ?? 0) >= MIN_PEAK_STRENGTH;
+        recentTops.length === 4 &&
+        Math.max(...recentTops) - Math.min(...recentTops) < 0.3 &&
+        (last?.strength ?? 0) >= LEARN_STRENGTH;
       this.emit({
         type: 'learn',
-        data: { speaker: which, seconds: Math.max(0, now - began - MUTE_GUARD_S), ms: last?.ms ?? null, strength: last?.strength ?? 0, stable: settled } satisfies SongLearn,
+        data: { speaker: which, seconds: Math.max(0, heard), ms: last?.ms ?? null, strength: last?.strength ?? 0, stable: settled, levelDb } satisfies SongLearn,
       });
       if (settled && last) return { ms: last.ms, pattern: last.pattern };
-      if (now - began > LEARN_MAX_S + MUTE_GUARD_S) {
-        if (last && last.strength >= MIN_PEAK_STRENGTH) return { ms: last.ms, pattern: last.pattern };
-        throw new Error(`Couldn't find ${mine.name}'s sound in the song (is it muted or too quiet?). ${await this.diagnose()}`);
+      const quiet = levelDb !== null && levelDb < MIN_LEVEL_DB;
+      if ((quiet && heard > 8) || heard > LEARN_MAX_S) {
+        if (quiet) {
+          throw new Error(
+            `${mine.name} is barely audible at the phone (${levelDb!.toFixed(0)} dB above the room noise). Turn its volume up or move the phone closer, then try again.`
+          );
+        }
+        throw new Error(`Couldn't get a clear reading of ${mine.name} (best peak ${last ? last.strength.toFixed(0) : 0}, needs ${LEARN_STRENGTH}). ${await this.diagnose()}`);
       }
     }
     return { ms: 0, pattern: [] };

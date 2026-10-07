@@ -89,6 +89,7 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
   if (!logRef.current) logRef.current = new LiveLog({ mode: 'song', song, a: a.name, b: b.name, userAgent: navigator.userAgent }, { speedS: 8, sensitivity: 12, keepVolumes: false });
   const log = logRef.current;
   const readingCount = useRef(0);
+  const speedRef = useRef(8);
 
   const others = useMemo(() => {
     const target = analyzeGroups(players, [aId, bId]).targets[0] ?? aId;
@@ -118,7 +119,7 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
           strengthB: Math.round(r.strengthB),
           locked: r.locked,
           peaks: r.peaks.map((p) => [Math.round(p.ms * 100) / 100, Math.round(p.strength)]),
-          memoryS: speed,
+          memoryS: speedRef.current,
           curve: n % 10 === 0 ? r.curve : undefined,
         });
       } else if (e.type === 'learn') {
@@ -160,7 +161,8 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
           {learn && (stage === 'learn_a' || stage === 'learn_b') && learn.speaker === (stage === 'learn_a' ? 'A' : 'B') && (
             <p className="text-xs text-text-muted">
               {learn.stable ? 'Got it' : `Listening ${learn.seconds.toFixed(0)} s…`}
-              {learn.ms !== null && ` (strength ${learn.strength.toFixed(0)})`}
+              {learn.ms !== null && ` (peak ${learn.strength.toFixed(0)})`}
+              {learn.levelDb !== null && ` · ${learn.levelDb.toFixed(0)} dB above room noise`}
             </p>
           )}
           {info && <p className="text-xs text-text-muted">{info}</p>}
@@ -208,6 +210,7 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
               key={v}
               onClick={() => {
                 setSpeed(v);
+                speedRef.current = v;
                 log.setting('speedS', v);
                 sessionRef.current?.setMemory(v);
               }}

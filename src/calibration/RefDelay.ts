@@ -135,7 +135,7 @@ export function findOffset(
 export class RefTracker {
   private readonly sr: number;
   private readonly N = REF_FRAME;
-  private acc: { re: Float64Array; im: Float64Array } | null = null;
+  private acc: { re: Float64Array; im: Float64Array; pm: Float64Array; ps: Float64Array } | null = null;
   private weight = 0;
   private memoryS: number;
   private readonly kLo: number;
@@ -167,21 +167,18 @@ export class RefTracker {
     const N = this.N;
     const M = spectrum(mic, 0, N);
     const S = spectrum(song, 0, N);
-    const re = new Float64Array(N);
-    const im = new Float64Array(N);
-    for (let k = this.kLo; k <= this.kHi; k++) {
-      const cr = M.re[k] * S.re[k] + M.im[k] * S.im[k];
-      const ci = M.im[k] * S.re[k] - M.re[k] * S.im[k];
-      const mag = Math.hypot(M.re[k], M.im[k]) * Math.hypot(S.re[k], S.im[k]) + 1e-12;
-      re[k] = cr / mag;
-      im[k] = ci / mag;
-    }
     const frameS = N / this.sr;
     const keep = this.acc ? Math.exp(-frameS / this.memoryS) : 0;
-    if (!this.acc) this.acc = { re: new Float64Array(N), im: new Float64Array(N) };
+    if (!this.acc) this.acc = { re: new Float64Array(N), im: new Float64Array(N), pm: new Float64Array(N), ps: new Float64Array(N) };
+    const a = this.acc;
+    // Cross-spectrum and the two power spectra, summed over frames. Normalising once at the end by the
+    // summed powers (instead of each frame on its own) lets loud passages count for more than quiet ones
+    // and silence, which only carries noise.
     for (let k = this.kLo; k <= this.kHi; k++) {
-      this.acc.re[k] = this.acc.re[k] * keep + re[k];
-      this.acc.im[k] = this.acc.im[k] * keep + im[k];
+      a.re[k] = a.re[k] * keep + (M.re[k] * S.re[k] + M.im[k] * S.im[k]);
+      a.im[k] = a.im[k] * keep + (M.im[k] * S.re[k] - M.re[k] * S.im[k]);
+      a.pm[k] = a.pm[k] * keep + (M.re[k] * M.re[k] + M.im[k] * M.im[k]);
+      a.ps[k] = a.ps[k] * keep + (S.re[k] * S.re[k] + S.im[k] * S.im[k]);
     }
     this.weight = this.weight * keep + 1;
     this.frames++;
@@ -193,8 +190,9 @@ export class RefTracker {
     const re = new Float64Array(N);
     const im = new Float64Array(N);
     for (let k = this.kLo; k <= this.kHi; k++) {
-      re[k] = this.acc.re[k] / this.weight;
-      im[k] = this.acc.im[k] / this.weight;
+      const norm = Math.sqrt(this.acc.pm[k] * this.acc.ps[k]) + 1e-12;
+      re[k] = this.acc.re[k] / norm;
+      im[k] = this.acc.im[k] / norm;
       re[N - k] = re[k];
       im[N - k] = -im[k];
     }
