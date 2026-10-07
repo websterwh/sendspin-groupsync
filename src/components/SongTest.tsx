@@ -172,7 +172,14 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
 
       {stage === 'live' && (
         <div className="p-6 bg-surface rounded-lg text-center">
-          {abs === null ? (
+          {reading?.mismatch ? (
+            <>
+              <p className="text-xl">The sound pattern changed</p>
+              <p className="text-xs text-text-muted mt-1">
+                Did the phone or a speaker move? Results only hold for where the phone is. Press Measure again.
+              </p>
+            </>
+          ) : abs === null ? (
             <>
               <p className="text-xl">Can't see both speakers</p>
               <p className="text-xs text-text-muted mt-1">
@@ -236,7 +243,6 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
       </div>
       {stopped || error ? (
         <div className="space-y-3">
-          {stopped && !error && <p className="text-sm text-text-muted text-center">Stopped. The graph and the log stay here until you go back.</p>}
           <button onClick={onExit} className="w-full py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium">
             Back
           </button>

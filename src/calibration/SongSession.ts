@@ -35,6 +35,8 @@ export interface SongReading {
   strengthA: number;
   strengthB: number;
   locked: boolean;
+  /** Both speakers fit far worse than when they were learned: the phone or a speaker has probably moved */
+  mismatch: boolean;
   peaks: RefPeak[];
   curve: { startMs: number; endMs: number; values: number[] };
 }
@@ -109,6 +111,10 @@ export class SongSession {
   private curveA: RefCurve | null = null;
   private curveB: RefCurve | null = null;
   private recent: number[] = [];
+  private refStrA = 0;
+  private refStrB = 0;
+  private refCount = 0;
+  private weakRun = 0;
   private songUrl = '';
   private noiseRms = 0;
   private requestsBefore = 0;
@@ -181,6 +187,19 @@ export class SongSession {
   }
 
   // ==================== stages ====================
+
+  /** What Music Assistant says about a speaker's volume and mute, for error messages */
+  private async speakerState(room: SongRoom): Promise<string> {
+    try {
+      const p = await maClient.getPlayer(room.playerId);
+      const bits: string[] = [];
+      if (p.volume_muted ?? p.muted) bits.push('muted');
+      if (typeof p.volume_level === 'number') bits.push(`volume ${p.volume_level}`);
+      return bits.length ? ` Music Assistant shows ${room.name} as ${bits.join(', ')}.` : '';
+    } catch {
+      return '';
+    }
+  }
 
   private async queueName(): Promise<string> {
     try {
@@ -365,7 +384,8 @@ export class SongSession {
       if ((quiet && heard > 8) || heard > LEARN_MAX_S) {
         if (quiet) {
           throw new Error(
-            `${mine.name} is barely audible at the phone (${levelDb!.toFixed(0)} dB above the room noise). Turn its volume up or move the phone closer, then try again.`
+            `${mine.name} is barely audible at the phone (${levelDb!.toFixed(0)} dB above the room noise). Turn its volume up or move the phone closer, then try again.` +
+              (await this.speakerState(mine))
           );
         }
         throw new Error(
@@ -386,6 +406,7 @@ export class SongSession {
     const tracker = new RefTracker(sr, this.memoryS);
     this.tracker = tracker;
     this.recent = [];
+    this.refStrA = this.refStrB = this.refCount = this.weakRun = 0;
     const began = this.recorder.elapsed;
     let at = began + MUTE_GUARD_S;
     while (this.running && !this.relearn) {
@@ -417,7 +438,18 @@ export class SongSession {
     const seenB = !!fit && fit.strengthB >= FIT_MIN_STRENGTH;
     const pa = seenA ? { ms: fit!.aMs, strength: fit!.strengthA } : undefined;
     const pb = seenB ? { ms: fit!.bMs, strength: fit!.strengthB } : undefined;
-    const gapMs = pa && pb ? pb.ms - pa.ms : null;
+    // How well the learned patterns fit now, compared with the first few readings: a sudden drop means the room changed
+    const sA = fit?.strengthA ?? 0;
+    const sB = fit?.strengthB ?? 0;
+    if (this.refCount < 5) {
+      this.refStrA = Math.max(this.refStrA, sA);
+      this.refStrB = Math.max(this.refStrB, sB);
+      this.refCount++;
+    }
+    const weak = this.refCount >= 5 && (sA < 0.35 * this.refStrA || sB < 0.35 * this.refStrB);
+    this.weakRun = weak ? this.weakRun + 1 : 0;
+    const mismatch = this.weakRun >= 3;
+    const gapMs = pa && pb && !mismatch ? pb.ms - pa.ms : null;
     this.recent = gapMs === null ? [] : [...this.recent, gapMs].slice(-4);
     const locked = this.recent.length === 4 && Math.max(...this.recent) - Math.min(...this.recent) <= 0.3;
 
@@ -446,6 +478,7 @@ export class SongSession {
       strengthA: pa?.strength ?? 0,
       strengthB: pb?.strength ?? 0,
       locked,
+      mismatch,
       peaks: peaks.slice(0, 5),
       curve: { startMs: curve.startMs, endMs: curve.startMs + (total / curve.sampleRate) * 1000, values },
     };

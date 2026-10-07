@@ -10,6 +10,9 @@ interface Props {
   onStart?: () => void;
 }
 
+const isUsable = (p: { available?: boolean; powered?: boolean; type?: string }) =>
+  p.available !== false && p.powered !== false && p.type !== 'group';
+
 export function PlayerList({ variant = 'click', onBack, onStart }: Props) {
   const { players, setPlayers, selectedPlayerIds, togglePlayerSelection, setSelection, loading } = usePlayersStore();
   const [cleaning, setCleaning] = useState(false);
@@ -93,7 +96,10 @@ export function PlayerList({ variant = 'click', onBack, onStart }: Props) {
           )}
 
           <div className="space-y-3">
-            {players.filter((p) => p.name !== 'GroupSync').map((player) => {
+            {[...players.filter((p) => p.name !== 'GroupSync')]
+              // online (selectable) speakers first, offline and group entries after; otherwise the order Music Assistant gave
+              .sort((x, y) => Number(isUsable(y)) - Number(isUsable(x)))
+              .map((player) => {
               // A group player is one entity; its members are the rooms to measure
               const isGroup = player.type === 'group';
               const isAvailable = player.available !== false && player.powered !== false && !isGroup;
