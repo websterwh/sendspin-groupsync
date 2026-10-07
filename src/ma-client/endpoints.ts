@@ -44,6 +44,7 @@ export const ENV_TOKEN_PLACEHOLDER = '__GROUPSYNC_ENV_TOKEN__';
 interface DevServerInfo {
   clickTrackUrl?: string | null;
   songUrlBase?: string | null;
+  songWavBase?: string | null;
   songStats?: { requests: number; lastAgoS: number | null; lastIp: string; lastName: string };
   tokenSaved?: boolean;
   canSaveToken?: boolean;
@@ -107,6 +108,19 @@ export async function fetchSong(name: string): Promise<ArrayBuffer> {
   const res = await fetch(`${basePath()}__groupsync/song/${encodeURIComponent(name)}`);
   if (!res.ok) throw new Error(`Couldn't load ${name} (${res.status})`);
   return res.arrayBuffer();
+}
+
+/**
+ * Hand the server the decoded song as a mono 16-bit wav and get back the address Music Assistant plays it
+ * from. Playing a wav (like the click track) works on every player, and it is exactly the audio compared against.
+ */
+export async function uploadSongWav(serverUrl: string, name: string, wav: ArrayBuffer): Promise<string> {
+  const info = await getDevServerInfo(serverUrl);
+  if (!info?.songWavBase) throw new Error("This server can't offer songs (is it the dev server?)");
+  const safe = `${name.replace(/\.[^.]*$/, '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 60) || 'song'}.wav`;
+  const res = await fetch(`${basePath()}__groupsync/songwav?name=${encodeURIComponent(safe)}`, { method: 'POST', body: wav });
+  if (!res.ok) throw new Error(`Couldn't hand the song to the server (${res.status})`);
+  return `${info.songWavBase}${encodeURIComponent(safe)}`;
 }
 
 /** What Music Assistant has asked this server for so far (song test diagnostics) */

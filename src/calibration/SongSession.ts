@@ -13,7 +13,7 @@
  */
 import { MicRecorder } from './MicRecorder';
 import { MuteController, type MuteProblem } from './muting';
-import { maClient, fetchSong, resolveSongUrl, getSongStats } from '../ma-client';
+import { maClient, fetchSong, uploadSongWav, getSongStats } from '../ma-client';
 import { RefTracker, findOffset, pickPeaks, toMono, REF_FRAME, type RefCurve, type RefPeak } from './RefDelay';
 import type { RecorderLike } from './LiveDriftSession';
 
@@ -64,6 +64,27 @@ const CONFIRM_STRENGTH = 30;
 const LABEL_WINDOW_MS = 20;
 const RECENTRE_MS = 25;
 const FIND_TIMEOUT_S = 60;
+
+/** Mono 16-bit wav of the samples: the very audio the speakers will play and the app compares against */
+function toWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (o: number, t: string) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF');
+  v.setUint32(4, 36 + samples.length * 2, true);
+  str(8, 'WAVEfmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  str(36, 'data');
+  v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) v.setInt16(44 + i * 2, Math.round(Math.max(-1, Math.min(1, samples[i])) * 32767), true);
+  return buf;
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -138,7 +159,8 @@ export class SongSession {
       this.emit({ type: 'info', data: `Song loaded: ${(this.song.length / sr / 60).toFixed(1)} min` });
 
       await this.mutes.set(new Set([this.b, ...this.others].map((r) => r.playerId)));
-      const url = await resolveSongUrl(this.serverUrl, this.songName);
+      this.emit({ type: 'info', data: 'Preparing the song…' });
+      const url = await uploadSongWav(this.serverUrl, this.songName, toWav(this.song, sr));
       this.songUrl = url;
       this.requestsBefore = (await getSongStats(this.serverUrl))?.requests ?? 0;
       await maClient.playMedia(this.queueId, url, 'replace');

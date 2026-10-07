@@ -52,6 +52,8 @@ const trackCache = new Map<number, Buffer>();
 /** What Music Assistant has requested from the click-track server (shown on the page while waiting) */
 const trackStats = { requests: 0, lastAt: 0, lastIp: '', lastRange: '' };
 /** Requests for songs on the plain-HTTP media port, i.e. what Music Assistant asked for */
+/** Songs the page decoded and uploaded as plain wav (mono, 16-bit): the exact audio it compares against */
+const songWavs = new Map<string, Buffer>();
 const songStats = { requests: 0, lastAt: 0, lastIp: '', lastName: '', bytes: 0 };
 
 /** Placeholder the page sends instead of the real token; swapped in by the proxy so the token never reaches the browser */
@@ -184,6 +186,22 @@ export function createGroupSyncCore(options: CoreOptions) {
     const url = new URL(req.url ?? '', 'http://localhost');
 
     if (url.pathname === `/${TRACK_NAME}`) return serveTrack(req, res, url);
+    if (url.pathname === '/__groupsync/songwav' && req.method === 'POST') {
+      if (!musicDir) {
+        res.statusCode = 404;
+        return res.end();
+      }
+      const name = (url.searchParams.get('name') ?? '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'song';
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        songWavs.clear();
+        songWavs.set(name, Buffer.concat(chunks));
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ name }));
+      });
+      return;
+    }
     if (url.pathname === '/__groupsync/songs') {
       res.setHeader('Content-Type', 'application/json');
       return res.end(JSON.stringify(listSongs()));
@@ -255,6 +273,7 @@ export function createGroupSyncCore(options: CoreOptions) {
     res.setHeader('Content-Type', 'application/json');
     res.end(
       JSON.stringify({
+        songWavBase: mediaHost && musicDir ? `http://${mediaHost}:${mediaPort}/songwav/` : null,
         songUrlBase: mediaHost && musicDir ? `http://${mediaHost}:${mediaPort}/song/` : null,
         clickTrackUrl: mediaHost ? `http://${mediaHost}:${mediaPort}/${TRACK_NAME}` : null,
         tokenSaved: !!getSetting('MA_TOKEN'),
@@ -273,6 +292,45 @@ export function createGroupSyncCore(options: CoreOptions) {
         },
       })
     );
+  };
+
+  const serveWav = (req: http.IncomingMessage, res: http.ServerResponse, name: string) => {
+    const buf = songWavs.get(name);
+    if (!buf) {
+      res.statusCode = 404;
+      return res.end();
+    }
+    songStats.requests++;
+    songStats.lastAt = Date.now();
+    songStats.lastIp = (req.socket.remoteAddress ?? '').replace('::ffff:', '');
+    songStats.lastName = name;
+    console.log(`[groupsync] ${songStats.lastIp} requested song "${name}" ${req.headers.range ?? ''}`);
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Accept-Ranges', 'bytes');
+    const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? '');
+    let start = 0;
+    let end = buf.length - 1;
+    if (range) {
+      if (range[1]) {
+        start = Number(range[1]);
+        end = range[2] ? Math.min(Number(range[2]), buf.length - 1) : buf.length - 1;
+      } else if (range[2]) {
+        start = Math.max(0, buf.length - Number(range[2]));
+      }
+      if (start >= buf.length || start > end) {
+        res.statusCode = 416;
+        res.setHeader('Content-Range', `bytes */${buf.length}`);
+        return res.end();
+      }
+      res.statusCode = 206;
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${buf.length}`);
+    }
+    res.setHeader('Content-Length', end - start + 1);
+    if (req.method === 'HEAD') return res.end();
+    res.on('close', () =>
+      console.log(`[groupsync] song request ${start}-${end}${res.writableFinished ? ': sent in full' : ': the player closed the connection early'}`)
+    );
+    res.end(buf.subarray(start, end + 1));
   };
 
   const listSongs = (): string[] => {
@@ -365,6 +423,7 @@ export function createGroupSyncCore(options: CoreOptions) {
     mediaServer = http.createServer((req, res) => {
       const reqUrl = new URL(req.url ?? '', 'http://localhost');
       if (reqUrl.pathname === `/${TRACK_NAME}`) return serveTrack(req, res, reqUrl);
+      if (reqUrl.pathname.startsWith('/songwav/')) return serveWav(req, res, decodeURIComponent(reqUrl.pathname.slice(9)));
       if (reqUrl.pathname.startsWith('/song/')) return serveSong(req, res, decodeURIComponent(reqUrl.pathname.slice(6)), true);
       res.statusCode = 404;
       res.end();
