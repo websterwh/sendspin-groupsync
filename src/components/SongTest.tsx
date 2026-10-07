@@ -84,6 +84,7 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
   const [muteProblems, setMuteProblems] = useState<MuteProblem[]>([]);
   const [speed, setSpeed] = useState(8);
   const [copied, setCopied] = useState<string | null>(null);
+  const [stopped, setStopped] = useState(false);
   const sessionRef = useRef<SongSession | null>(null);
   const logRef = useRef<LiveLog | null>(null);
   if (!logRef.current) logRef.current = new LiveLog({ mode: 'song', song, a: a.name, b: b.name, userAgent: navigator.userAgent }, { speedS: 8, sensitivity: 12, keepVolumes: false });
@@ -233,28 +234,38 @@ function Run({ aId, bId, song, onExit }: { aId: string; bId: string; song: strin
           {copied ?? 'Copy log'}
         </button>
       </div>
-      <div className="flex gap-3">
-        <button
-          onClick={() => {
-            sessionRef.current?.learnAgain();
-            log.event('relearn');
-            setHistory([]);
-          }}
-          disabled={stage !== 'live'}
-          className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
-        >
-          Measure again
-        </button>
-        <button
-          onClick={() => {
-            sessionRef.current?.stop();
-            onExit();
-          }}
-          className="flex-1 py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium"
-        >
-          Stop
-        </button>
-      </div>
+      {stopped || error ? (
+        <div className="space-y-3">
+          {stopped && !error && <p className="text-sm text-text-muted text-center">Stopped. The graph and the log stay here until you go back.</p>}
+          <button onClick={onExit} className="w-full py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium">
+            Back
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-3">
+          <button
+            onClick={() => {
+              sessionRef.current?.learnAgain();
+              log.event('relearn');
+              setHistory([]);
+            }}
+            disabled={stage !== 'live'}
+            className="flex-1 py-3 px-4 bg-surface hover:bg-gray-700 disabled:opacity-40 rounded-lg font-medium"
+          >
+            Measure again
+          </button>
+          <button
+            onClick={() => {
+              sessionRef.current?.stop();
+              log.event('stopped');
+              setStopped(true);
+            }}
+            className="flex-1 py-3 px-4 bg-secondary hover:bg-secondary/80 rounded-lg font-medium"
+          >
+            Stop
+          </button>
+        </div>
+      )}
     </div>
   );
 }

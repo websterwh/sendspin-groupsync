@@ -62,7 +62,9 @@ const LEARN_MAX_S = 25;
 const MUTE_GUARD_S = 3;
 const MIN_PEAK_STRENGTH = 12;
 /** A speaker's own peak must reach this before it is accepted while learning (noise peaks stay lower) */
-const LEARN_STRENGTH = 18;
+const LEARN_STRENGTH = 12;
+/** Some speakers' timing wobbles from moment to moment; the peaks of the last few frames may spread this far and still count as one speaker */
+const WOBBLE_SPAN_MS = 40;
 /** Quieter than this above the room noise and the speaker can't be measured */
 const MIN_LEVEL_DB = 6;
 /** A real match shows a peak far above this in the detailed comparison (simulated ones are 100+, noise stays below 20) */
@@ -316,6 +318,7 @@ export class SongSession {
     const tops: number[] = [];
     let last: { ms: number; strength: number; curve: RefCurve } | null = null;
     let levelDb: number | null = null;
+    let wobbleMs = 0;
     while (this.running) {
       await sleep(400);
       this.emit({ type: 'level', data: this.recorder.level });
@@ -339,18 +342,25 @@ export class SongSession {
         last = { ms: top.ms, strength: top.strength, curve: curve! };
         tops.push(top.ms);
       }
-      // Settled: the same peak, strong, over the last four frames
+      // Settled: a strong peak that has stayed in the same place over the last few frames (it may wobble a little)
       const recentTops = tops.slice(-4);
+      const span = recentTops.length ? Math.max(...recentTops) - Math.min(...recentTops) : Infinity;
       const settled =
         tracker.frames >= LEARN_MIN_FRAMES &&
         recentTops.length === 4 &&
-        Math.max(...recentTops) - Math.min(...recentTops) < 0.3 &&
+        span < WOBBLE_SPAN_MS &&
         (last?.strength ?? 0) >= LEARN_STRENGTH;
+      wobbleMs = span;
       this.emit({
         type: 'learn',
         data: { speaker: which, seconds: Math.max(0, heard), ms: last?.ms ?? null, strength: last?.strength ?? 0, stable: settled, levelDb } satisfies SongLearn,
       });
-      if (settled && last) return { ms: last.ms, curve: last.curve };
+      if (settled && last) {
+        if (wobbleMs > 2) {
+          this.emit({ type: 'info', data: `${mine.name}'s timing moves around by about ${wobbleMs.toFixed(0)} ms from moment to moment, so its result is only that exact.` });
+        }
+        return { ms: last.ms, curve: last.curve };
+      }
       const quiet = levelDb !== null && levelDb < MIN_LEVEL_DB;
       if ((quiet && heard > 8) || heard > LEARN_MAX_S) {
         if (quiet) {
