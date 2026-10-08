@@ -1,5 +1,39 @@
 # GroupSync
 
+## Song test (dev server only)
+
+`npm run dev` also has a **Song test**, which is the accurate way to measure two speakers while music plays. Put a long song in `groupsync-music/` (git-ignored; see the README there), pick two speakers and a song. GroupSync plays the song on the group itself, so it can compare the microphone with the exact audio: each speaker shows up as its own sharp peak, so the screen says which speaker is later and by how much (to a fraction of a millisecond), and follows it live (Speed sets how fast it reacts). It first plays each speaker alone for a few seconds, then both together. *Download log* / *Copy log* save every reading. Nothing is sent to the add-on build.
+
+## Live drift test (dev server only)
+
+`npm run dev` has a second tool on the home screen: **Live drift test**. Pick two speakers, play your own music (Spotify Connect, anything), and it shows the gap between them while the music plays, with a chart of how it changes. It learns the room first (only speaker A plays, then only B, using mute; each stage ends as soon as the echo pattern is stable, usually 10-30 s) and matches the two speakers' volumes at the phone (restored when you stop unless you tick *Keep*), then updates about once a second. *Speed* sets how much recent audio counts (Fast reacts in a few seconds, Steady is smoother); *Clear* restarts the readings after you change a delay.
+
+- It reports the *size* of the gap, not which speaker is ahead. The click test gives the direction, and the live screen shows the last click-test value for the pair so you can compare.
+- It works best with busy music or speech. Put the phone between the speakers at about equal distance.
+- It is not included in production builds or the Home Assistant app.
+
+## Home Assistant app (add-on)
+
+Run GroupSync inside Home Assistant and open it from the HA app's sidebar (no computer needed).
+
+1. Copy the `groupsync/` folder of this repo into Home Assistant's `/addons/` folder (the `addons` Samba share, or the SSH add-on).
+2. Settings → Apps → *Install app* (App store) → ⋮ → *Check for updates*. **GroupSync** appears under *Local apps*. Install it. (Older HA versions call these Add-ons.)
+3. In its Configuration tab set `ma_url` (e.g. `192.168.1.9:8095`) and `ma_token` (a long-lived token from Music Assistant). Start it and turn on *Show in sidebar*.
+4. Open Home Assistant over **HTTPS** (Nabu Casa, DuckDNS or your own certificate). Browsers, including the HA app, block the microphone on plain `http://`.
+
+The token stays on the server; the page never sees it. Music Assistant fetches the click track from the add-on on port 5174.
+After changing the code run `npm run build:addon`, copy `groupsync/` over again and rebuild the add-on.
+
+## Quick start (how measurement works now)
+
+1. `npm install && npm run dev` on a desktop; open the printed **https** Network URL on your phone (accept the self-signed cert once - needed for the mic).
+2. Connect with MA's address (`192.168.x.x:8095`, plain HTTP is fine) and paste a long-lived token (tick *Save token in .env.local* to keep it on the desktop as `MA_TOKEN`; the dev server substitutes it, so it never reaches the browser and phones connect without typing it). The dev server proxies MA over `wss://` so the browser doesn't block it, and serves the click track over plain HTTP on port 5174 (allow 5173/5174 through the desktop firewall). No other setup.
+3. Put the players you want in sync into **one sync group in Music Assistant**, select them here and start. Walk to each room and tap *Measure here*; return to the first room at the end (corrects clock drift).
+4. Results are shown as a suggested per-player sync delay (MA's `sync_adjust`). Enter them in MA yourself, or tick *auto-push* (off by default).
+
+Why one recording: every room is compared on the same track timeline inside a single recording, so the unknown delay between "play" and sound cancels out. Measuring speakers one at a time cannot give a sync offset.
+
+
 A mobile web application for synchronizing multiple Sendspin players in multi-room audio setups.
 
 ## Overview

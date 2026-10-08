@@ -11,6 +11,8 @@ interface PlayersState {
 interface PlayersActions {
   setPlayers: (players: Player[]) => void;
   togglePlayerSelection: (playerId: string) => void;
+  makeReference: (playerId: string) => void;
+  setSelection: (ids: string[]) => void;
   selectAllPlayers: () => void;
   clearSelection: () => void;
   setLoading: (loading: boolean) => void;
@@ -37,6 +39,15 @@ export const usePlayersStore = create<PlayersState & PlayersActions>()((set, get
     } else {
       set({ selectedPlayerIds: [...selectedPlayerIds, playerId] });
     }
+  },
+
+  setSelection: (ids) => set({ selectedPlayerIds: ids }),
+
+  // The first selected player is the reference room in calibration
+  makeReference: (playerId) => {
+    const { selectedPlayerIds } = get();
+    if (!selectedPlayerIds.includes(playerId)) return;
+    set({ selectedPlayerIds: [playerId, ...selectedPlayerIds.filter((id) => id !== playerId)] });
   },
 
   selectAllPlayers: () => {

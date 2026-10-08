@@ -132,7 +132,6 @@ export class ClockSynchronizer {
     this.lastUpdateTime = 0;
     this.measurementCount = 0;
 
-    console.log('[ClockSync] Reset');
   }
 
   /**
@@ -158,9 +157,6 @@ export class ClockSynchronizer {
       this.lastUpdateTime = t4;
       this.measurementCount = 1;
 
-      console.log(
-        `[ClockSync] Initial sync: offset=${measuredOffset.toFixed(0)}μs, RTT=${rtt.toFixed(0)}μs`
-      );
       return;
     }
 
@@ -215,15 +211,6 @@ export class ClockSynchronizer {
 
     this.lastUpdateTime = t4;
     this.measurementCount++;
-
-    // Log progress
-    if (this.measurementCount <= 10 || this.measurementCount % 10 === 0) {
-      console.log(
-        `[ClockSync] #${this.measurementCount}: offset=${this.offset.toFixed(0)}μs ` +
-        `(±${this.offsetUncertainty.toFixed(0)}), drift=${this.drift.toFixed(2)}μs/s, ` +
-        `RTT=${rtt.toFixed(0)}μs`
-      );
-    }
   }
 
   /**

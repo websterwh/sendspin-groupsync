@@ -1,21 +1,57 @@
-import { usePlayersStore, useCalibrationStore, useConnectionStore } from '../store';
+import { usePlayersStore, useCalibrationStore } from '../store';
+import { useState } from 'react';
 import { maClient } from '../ma-client';
 
-export function PlayerList() {
-  const { players, selectedPlayerIds, togglePlayerSelection, loading, reset: resetPlayers } = usePlayersStore();
-  const { setPhase } = useCalibrationStore();
-  const { reset: resetConnection } = useConnectionStore();
+interface Props {
+  /** 'click' picks any number of speakers; 'live' picks exactly two */
+  variant?: 'click' | 'live';
+  onBack: () => void;
+  /** Called by the Start button (default: open the click-test instructions) */
+  onStart?: () => void;
+}
 
-  const handleStartCalibration = () => {
-    if (selectedPlayerIds.length > 0) {
-      setPhase('instructions');
+const isUsable = (p: { available?: boolean; powered?: boolean; type?: string }) =>
+  p.available !== false && p.powered !== false && p.type !== 'group';
+
+export function PlayerList({ variant = 'click', onBack, onStart }: Props) {
+  const { players, setPlayers, selectedPlayerIds, togglePlayerSelection, setSelection, loading } = usePlayersStore();
+  const [cleaning, setCleaning] = useState(false);
+  // Leftovers from older GroupSync versions that registered a Sendspin player on every run
+  const ghostPlayers = players.filter((p) => p.name === 'GroupSync');
+
+  const handleCleanup = async () => {
+    if (!window.confirm(`Remove ${ghostPlayers.length} "GroupSync" player(s) from Music Assistant? Other players are not touched.`)) return;
+    setCleaning(true);
+    for (const ghost of ghostPlayers) {
+      try {
+        await maClient.removePlayerConfig(ghost.player_id);
+      } catch (e) {
+        console.warn('[UI] Could not remove', ghost.player_id, e);
+      }
+    }
+    try {
+      setPlayers(await maClient.getAllPlayers());
+    } finally {
+      setCleaning(false);
     }
   };
+  const { setPhase } = useCalibrationStore();
+  const live = variant === 'live';
+  const canStart = live ? selectedPlayerIds.length === 2 : selectedPlayerIds.length > 0;
 
-  const handleDisconnect = () => {
-    maClient.disconnect();
-    resetConnection();
-    resetPlayers();
+  const handleStart = () => {
+    if (!canStart) return;
+    if (onStart) onStart();
+    else setPhase('instructions');
+  };
+
+  // The live test compares exactly two speakers: picking a third replaces the oldest pick
+  const handleToggle = (id: string) => {
+    if (live && !selectedPlayerIds.includes(id) && selectedPlayerIds.length >= 2) {
+      setSelection([selectedPlayerIds[1], id]);
+    } else {
+      togglePlayerSelection(id);
+    }
   };
 
   const noPlayersFound = players.length === 0 && !loading;
@@ -23,9 +59,11 @@ export function PlayerList() {
   return (
     <div className="space-y-6 pb-24">
       <div>
-        <h2 className="text-2xl font-bold mb-2">Select Players</h2>
-        <p className="text-text-muted">
-          Choose which players to calibrate for synchronized playback.
+        <h2 className="text-2xl font-bold">{live ? 'Pick two speakers' : 'Speakers'}</h2>
+        <p className="text-text-muted text-sm">
+          {live
+            ? 'They need to share a sync group in Music Assistant.'
+            : 'Pick the speakers to compare. They need to share a sync group in Music Assistant.'}
         </p>
       </div>
 
@@ -38,24 +76,40 @@ export function PlayerList() {
         <>
           {noPlayersFound && (
             <div className="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm">
-              <p className="font-medium mb-1">No players found</p>
-              <p className="text-yellow-300/70">
-                Make sure your players are connected to Music Assistant and powered on.
-              </p>
+              No players found.
+            </div>
+          )}
+
+          {ghostPlayers.length > 0 && (
+            <div className="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-300 text-sm flex items-center gap-3">
+              <span className="flex-1">
+                {ghostPlayers.length} leftover &quot;GroupSync&quot; player(s).
+              </span>
+              <button
+                onClick={handleCleanup}
+                disabled={cleaning}
+                className="px-3 py-1 bg-yellow-700/40 hover:bg-yellow-700/60 rounded disabled:opacity-50"
+              >
+                {cleaning ? 'Removing...' : 'Remove'}
+              </button>
             </div>
           )}
 
           <div className="space-y-3">
-            {players.map((player) => {
-              const isAvailable = player.available !== false && player.powered !== false;
+            {[...players.filter((p) => p.name !== 'GroupSync')]
+              // online (selectable) speakers first, offline and group entries after; otherwise the order Music Assistant gave
+              .sort((x, y) => Number(isUsable(y)) - Number(isUsable(x)))
+              .map((player) => {
+              // A group player is one entity; its members are the rooms to measure
+              const isGroup = player.type === 'group';
+              const isAvailable = player.available !== false && player.powered !== false && !isGroup;
               const isSelected = selectedPlayerIds.includes(player.player_id);
 
               return (
                 <button
                   key={player.player_id}
                   onClick={() => {
-                    console.log('[UI] Tapped player:', player.player_id, player.name);
-                    togglePlayerSelection(player.player_id);
+                    handleToggle(player.player_id);
                   }}
                   disabled={!isAvailable}
                   className={`w-full flex items-center gap-3 p-4 rounded-lg border transition-colors touch-manipulation
@@ -81,8 +135,7 @@ export function PlayerList() {
                   <div className="flex-1 text-left min-w-0">
                     <div className="font-medium truncate">{player.name}</div>
                     <div className="text-sm text-text-muted">
-                      {isAvailable ? 'Available' : 'Offline'}
-                      {player.type && ` · ${player.type}`}
+                      {isGroup ? 'Group: pick its speakers instead' : isAvailable ? 'Available' : 'Offline'}
                     </div>
                   </div>
                   <div className={`w-2 h-2 rounded-full shrink-0 ${isAvailable ? 'bg-secondary' : 'bg-gray-500'}`} />
@@ -93,21 +146,21 @@ export function PlayerList() {
         </>
       )}
 
-      <div className="fixed bottom-16 left-0 right-0 p-4 bg-background border-t border-gray-700">
+      <div className="fixed bottom-0 left-0 right-0 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] bg-background border-t border-gray-700">
         <div className="max-w-lg mx-auto flex gap-3">
           <button
-            onClick={handleDisconnect}
+            onClick={onBack}
             className="px-4 py-3 bg-surface hover:bg-gray-700 rounded-lg font-medium transition-colors"
           >
-            Disconnect
+            Back
           </button>
           <button
-            onClick={handleStartCalibration}
-            disabled={selectedPlayerIds.length === 0}
+            onClick={handleStart}
+            disabled={!canStart}
             className="flex-1 py-3 px-4 bg-primary hover:bg-primary-dark disabled:opacity-50
                        rounded-lg font-medium transition-colors"
           >
-            Start Calibration ({selectedPlayerIds.length})
+            {live ? `Next (${selectedPlayerIds.length}/2)` : `Start (${selectedPlayerIds.length})`}
           </button>
         </div>
       </div>

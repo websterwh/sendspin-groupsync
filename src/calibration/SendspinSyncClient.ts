@@ -8,19 +8,15 @@
  */
 
 import { ClockSynchronizer, clockSynchronizer } from './ClockSynchronizer';
+import { maClient } from '../ma-client';
+import { buildMaWebSocketUrl } from '../ma-client/endpoints';
 
 export type SendspinSyncState = 'disconnected' | 'connecting' | 'handshaking' | 'syncing' | 'synced';
 
 interface SendspinMessage {
   type: string;
   payload?: Record<string, unknown>;
-}
-
-interface ServerHelloPayload {
-  name: string;
-  server_id: string;
-  active_roles: string[];
-  connection_reason?: string;
+  token?: string;
 }
 
 interface ServerTimePayload {
@@ -44,9 +40,6 @@ export class SendspinSyncClient {
   // Client identity
   private readonly clientId: string;
   private readonly clientName: string;
-
-  // Server info
-  private serverName = '';
 
   // Configuration
   private static readonly TIME_SYNC_INTERVAL_MS = 1000;
@@ -96,7 +89,6 @@ export class SendspinSyncClient {
     return new Promise((resolve, reject) => {
       try {
         const wsUrl = this.buildWebSocketUrl(serverUrl);
-        console.log('[SendspinSync] Connecting to:', wsUrl);
 
         this.ws = new WebSocket(wsUrl);
 
@@ -106,14 +98,19 @@ export class SendspinSyncClient {
         }, 10000);
 
         this.ws.onopen = () => {
-          console.log('[SendspinSync] WebSocket connected, sending client/hello');
           clearTimeout(timeout);
           this.setState('handshaking');
-          this.sendClientHello();
+          // MA's /sendspin proxy requires {type:'auth', token} as the first frame
+          // and answers {type:'auth_ok'} before it will proxy client/hello.
+          const token = maClient.token;
+          if (token) {
+            this.sendMessage({ type: 'auth', token });
+          } else {
+            this.sendClientHello();
+          }
         };
 
         this.ws.onmessage = (event) => {
-          console.log('[SendspinSync] Received message:', event.data.slice(0, 200));
           this.handleMessage(event.data);
 
           // Resolve when handshake completes
@@ -129,8 +126,7 @@ export class SendspinSyncClient {
           reject(new Error(`WebSocket connection failed to ${wsUrl}`));
         };
 
-        this.ws.onclose = (event) => {
-          console.log('[SendspinSync] WebSocket closed:', event.code, event.reason || '(no reason)');
+        this.ws.onclose = () => {
           this.stopSyncLoop();
           this.setState('disconnected');
         };
@@ -199,7 +195,6 @@ export class SendspinSyncClient {
   private setState(state: SendspinSyncState): void {
     if (this.state === state) return;
 
-    console.log(`[SendspinSync] State: ${this.state} -> ${state}`);
     this.state = state;
 
     this.stateHandlers.forEach((handler) => {
@@ -212,17 +207,7 @@ export class SendspinSyncClient {
   }
 
   private buildWebSocketUrl(serverUrl: string): string {
-    let url = serverUrl.replace(/\/$/, '');
-
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `http://${url}`;
-    }
-
-    const parsed = new URL(url);
-    const isPageSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
-    const wsProtocol = isPageSecure || parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-
-    return `${wsProtocol}//${parsed.host}/sendspin`;
+    return buildMaWebSocketUrl(serverUrl, '/sendspin');
   }
 
   private generateUUID(): string {
@@ -238,9 +223,13 @@ export class SendspinSyncClient {
       const message = JSON.parse(data) as SendspinMessage;
 
       switch (message.type) {
+        case 'auth_ok':
+          this.sendClientHello();
+          break;
+
         case 'server/hello':
           if (message.payload) {
-            this.handleServerHello(message.payload as unknown as ServerHelloPayload);
+            this.handleServerHello();
           }
           break;
 
@@ -259,11 +248,7 @@ export class SendspinSyncClient {
     }
   }
 
-  private handleServerHello(payload: ServerHelloPayload): void {
-    this.serverName = payload.name;
-    console.log('[SendspinSync] Connected to server:', this.serverName);
-    console.log('[SendspinSync] Active roles:', payload.active_roles);
-
+  private handleServerHello(): void {
     this.setState('syncing');
     this.startSyncLoop();
   }
@@ -310,7 +295,6 @@ export class SendspinSyncClient {
     };
 
     this.sendMessage(message);
-    console.log('[SendspinSync] Sent client/hello');
   }
 
   private sendGoodbye(): void {

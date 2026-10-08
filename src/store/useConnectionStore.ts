@@ -8,6 +8,8 @@ interface ConnectionState {
   connecting: boolean;
   error: string | null;
   recentServers: string[];
+  /** Set when the user disconnects on purpose, so we don't reconnect straight away (not persisted) */
+  autoConnectOff: boolean;
 }
 
 interface ConnectionActions {
@@ -17,6 +19,7 @@ interface ConnectionActions {
   setConnecting: (connecting: boolean) => void;
   setError: (error: string | null) => void;
   addRecentServer: (url: string) => void;
+  setAutoConnectOff: (off: boolean) => void;
   reset: () => void;
 }
 
@@ -27,6 +30,7 @@ const initialState: ConnectionState = {
   connecting: false,
   error: null,
   recentServers: [],
+  autoConnectOff: false,
 };
 
 export const useConnectionStore = create<ConnectionState & ConnectionActions>()(
@@ -40,7 +44,8 @@ export const useConnectionStore = create<ConnectionState & ConnectionActions>()(
 
       setConnected: (connected) => set({ connected, connecting: false }),
 
-      setConnecting: (connecting) => set({ connecting, error: null }),
+      // Starting a connection clears the old error; finishing one must not wipe a new error
+      setConnecting: (connecting) => set(connecting ? { connecting, error: null } : { connecting }),
 
       setError: (error) => set({ error, connecting: false, connected: false }),
 
@@ -50,7 +55,10 @@ export const useConnectionStore = create<ConnectionState & ConnectionActions>()(
         set({ recentServers: [url, ...filtered].slice(0, 5) });
       },
 
-      reset: () => set({ ...initialState, recentServers: get().recentServers }),
+      setAutoConnectOff: (off) => set({ autoConnectOff: off }),
+
+      reset: () =>
+        set({ ...initialState, serverUrl: get().serverUrl, recentServers: get().recentServers, autoConnectOff: true }),
     }),
     {
       name: 'groupsync-connection',

@@ -67,7 +67,6 @@ export class AudioDetector {
 
       this.audioContext = new AudioContext({ sampleRate: this.config.sampleRate });
 
-      console.log('[AudioDetector] Initialized with sample rate:', this.audioContext.sampleRate);
     } catch (error) {
       console.error('[AudioDetector] Failed to initialize:', error);
       throw new Error('Microphone access denied');
@@ -112,7 +111,6 @@ export class AudioDetector {
       this.processAudioChunk(inputBuffer);
     };
 
-    console.log('[AudioDetector] Started listening');
   }
 
   /**
@@ -131,7 +129,6 @@ export class AudioDetector {
       this.analyser = null;
     }
 
-    console.log('[AudioDetector] Stopped listening');
   }
 
   /**
@@ -183,12 +180,10 @@ export class AudioDetector {
         const dataArray = new Float32Array(this.analyser.fftSize);
         this.analyser.getFloatTimeDomainData(dataArray);
         this.noiseFloor = this.computeRMS(dataArray);
-        console.log('[AudioDetector] Noise floor:', this.noiseFloor.toFixed(4));
       }
     }, 500);
   }
 
-  private debugLogCounter = 0;
 
   private processAudioChunk(samples: Float32Array): void {
     // Add to ring buffer
@@ -203,13 +198,6 @@ export class AudioDetector {
     // Check for onset (energy significantly above noise floor)
     const threshold = Math.max(this.config.onsetThreshold, this.noiseFloor * 3);
 
-    // Debug logging every ~1 second (48000 samples / 2048 buffer = ~23 chunks/sec)
-    this.debugLogCounter++;
-    if (this.debugLogCounter % 23 === 0) {
-      const frequency = this.detectDominantFrequency();
-      console.log(`[AudioDetector] Level: ${rms.toFixed(4)}, threshold: ${threshold.toFixed(4)}, freq: ${frequency?.toFixed(0) ?? 'none'}Hz`);
-    }
-
     if (rms > threshold) {
       const now = performance.now();
       const elapsed = now - this.startTime;
@@ -221,7 +209,6 @@ export class AudioDetector {
 
       // Verify frequency
       const frequency = this.detectDominantFrequency();
-      console.log(`[AudioDetector] Onset detected! RMS: ${rms.toFixed(4)}, freq: ${frequency?.toFixed(0)}Hz, expected: ${this.config.expectedFrequencies}`);
 
       if (frequency && this.isExpectedFrequency(frequency)) {
         this.lastDetectionTime = elapsed;
@@ -233,10 +220,7 @@ export class AudioDetector {
           sampleOffset: 0, // Will be calculated by OffsetCalculator
         };
 
-        console.log('[AudioDetector] Click detected:', detection);
         this.detectionCallback?.(detection);
-      } else {
-        console.log(`[AudioDetector] Frequency ${frequency?.toFixed(0)}Hz not in expected list, ignoring`);
       }
     }
   }

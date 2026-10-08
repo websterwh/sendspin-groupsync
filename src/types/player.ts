@@ -8,10 +8,17 @@ export interface Player {
   type: string;
   available: boolean;
   powered: boolean;
+  playback_state?: string;
+  output_protocols?: Array<{ output_protocol_id: string; protocol_domain?: string; is_native?: boolean; available?: boolean }>;
+  state?: string;
   volume_level: number;
-  muted: boolean;
+  muted?: boolean;
+  volume_muted?: boolean;
   group_childs?: string[];
-  synced_to?: string;
+  group_members?: string[];
+  static_group_members?: string[];
+  synced_to?: string | null;
+  active_group?: string | null;
   can_sync_with?: string[];
 }
 

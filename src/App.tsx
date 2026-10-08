@@ -1,11 +1,17 @@
-import { useConnectionStore, useCalibrationStore } from './store';
+import { lazy, Suspense } from 'react';
+import { useConnectionStore, useCalibrationStore, useAppStore } from './store';
 import { ConnectionPanel } from './components/ConnectionPanel';
+import { Home } from './components/Home';
 import { PlayerList } from './components/PlayerList';
 import { CalibrationWizard } from './components/CalibrationWizard';
+
+// Dev-only tool: not part of production builds (and so not in the Home Assistant add-on)
+const LiveHub = import.meta.env.DEV ? lazy(() => import('./components/LiveHub')) : null;
 
 function App() {
   const { connected } = useConnectionStore();
   const { phase } = useCalibrationStore();
+  const { screen, setScreen } = useAppStore();
 
   return (
     <div className="min-h-screen bg-background text-text">
@@ -26,19 +32,18 @@ function App() {
       <main className="max-w-lg mx-auto p-4">
         {!connected ? (
           <ConnectionPanel />
+        ) : screen === 'home' ? (
+          <Home />
+        ) : screen === 'live' && LiveHub ? (
+          <Suspense fallback={<p className="text-text-muted">Loading…</p>}>
+            <LiveHub onBack={() => setScreen('home')} />
+          </Suspense>
         ) : phase === 'idle' || phase === 'selecting' ? (
-          <PlayerList />
+          <PlayerList onBack={() => setScreen('home')} />
         ) : (
           <CalibrationWizard />
         )}
       </main>
-
-      {/* Footer */}
-      <footer className="fixed bottom-0 left-0 right-0 bg-surface border-t border-gray-700 p-2">
-        <p className="text-center text-xs text-text-muted">
-          GroupSync - Sendspin Audio Synchronization
-        </p>
-      </footer>
     </div>
   );
 }

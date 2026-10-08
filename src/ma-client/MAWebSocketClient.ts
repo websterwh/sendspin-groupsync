@@ -4,6 +4,7 @@
  */
 
 import type { MAMessage, Player } from '../types';
+import { buildMaWebSocketUrl, getDevServerInfo, ENV_TOKEN_PLACEHOLDER } from './endpoints';
 
 type MessageHandler = (message: MAMessage) => void;
 type ConnectionHandler = () => void;
@@ -52,10 +53,11 @@ export class MAWebSocketClient {
   /**
    * Connect to Music Assistant server
    */
-  async connect(serverUrl: string): Promise<void> {
+  async connect(serverUrl: string, isReconnect = false): Promise<void> {
     this.serverUrl = serverUrl;
-    this.shouldReconnect = true;
-    this.reconnectAttempts = 0;
+    // Only auto-reconnect after a connection has worked once; a failed first attempt just fails
+    this.shouldReconnect = isReconnect;
+    if (!isReconnect) this.reconnectAttempts = 0;
     this.initialized = false;
 
     return new Promise((resolve, reject) => {
@@ -72,7 +74,6 @@ export class MAWebSocketClient {
         }, 10000);
 
         this.ws.onopen = () => {
-          console.log('[MA] WebSocket connected, waiting for server info...');
         };
 
         this.ws.onmessage = (event) => {
@@ -85,9 +86,9 @@ export class MAWebSocketClient {
               if (msg.server_id && msg.server_version) {
                 this.serverInfo = msg as ServerInfo;
                 this.initialized = true;
-                console.log('[MA] Server info:', this.serverInfo);
                 clearTimeout(connectionTimeout);
                 this.reconnectAttempts = 0;
+                this.shouldReconnect = true;
                 this.connectionHandlers.forEach((handler) => handler());
                 resolve();
                 return;
@@ -154,6 +155,14 @@ export class MAWebSocketClient {
   }
 
   /**
+   * Current access token (for the Sendspin proxy auth frame)
+   */
+  get token(): string | null {
+    const t = this.accessToken || this.getStoredToken();
+    return t === ENV_TOKEN_PLACEHOLDER ? null : t;
+  }
+
+  /**
    * Check if authentication is required
    */
   get needsAuth(): boolean {
@@ -171,7 +180,6 @@ export class MAWebSocketClient {
     });
 
     this.accessToken = result.access_token;
-    console.log('[MA] Got access token, authenticating session...');
 
     // Now authenticate the session with the token
     await this.sendCommand('auth', {
@@ -180,7 +188,6 @@ export class MAWebSocketClient {
     });
 
     this.authenticated = true;
-    console.log('[MA] Authenticated as:', result.user.username);
 
     // Store token for reconnection
     try {
@@ -208,12 +215,29 @@ export class MAWebSocketClient {
       this.accessToken = tokenToUse;
       this.authenticated = true;
       console.log('[MA] Authenticated with token');
+      if (tokenToUse !== ENV_TOKEN_PLACEHOLDER) {
+        try {
+          localStorage.setItem('ma_access_token', tokenToUse);
+        } catch {
+          // localStorage not available
+        }
+      }
       return true;
     } catch (error) {
-      console.log('[MA] Token authentication failed:', error);
-      this.clearStoredToken();
+      console.log('[MA] Token authentication failed:', error instanceof Error ? error.message : 'error');
+      if (tokenToUse !== ENV_TOKEN_PLACEHOLDER) this.clearStoredToken();
       return false;
     }
+  }
+
+  /**
+   * Authenticate with the token saved in .env.local on the dev-server machine.
+   * The browser only sends a placeholder; the dev-server proxy substitutes the real token.
+   */
+  async authenticateWithServerToken(): Promise<boolean> {
+    const info = await getDevServerInfo(this.serverUrl);
+    if (!info?.tokenSaved) return false;
+    return this.authenticateWithToken(ENV_TOKEN_PLACEHOLDER);
   }
 
   /**
@@ -282,7 +306,6 @@ export class MAWebSocketClient {
         args,
       };
 
-      console.log('[MA] Sending:', command, args);
       this.ws!.send(JSON.stringify(message));
     });
   }
@@ -393,32 +416,61 @@ export class MAWebSocketClient {
     });
   }
 
+  /**
+   * Read the player's current sync delay (sync_adjust, ms) from its MA config.
+   * Returns null if it can't be read.
+   */
+  async getPlayerSyncAdjust(playerId: string): Promise<number | null> {
+    try {
+      const config = await this.sendCommand<{ values?: Record<string, unknown> }>('config/players/get', {
+        player_id: playerId,
+      });
+      const entry = config?.values?.sync_adjust;
+      const raw =
+        entry && typeof entry === 'object' ? (entry as { value?: unknown }).value : entry;
+      const value = Number(raw ?? 0);
+      return Number.isFinite(value) ? value : null;
+    } catch (error) {
+      console.warn('[MA] Could not read sync_adjust for', playerId, error);
+      return null;
+    }
+  }
+
+  /**
+   * Read a player's config values as plain numbers/strings (entries may be objects with a .value).
+   * Returns null if the config can't be read.
+   */
+  async getPlayerConfigValues(playerId: string): Promise<Record<string, unknown> | null> {
+    try {
+      const config = await this.sendCommand<{ values?: Record<string, unknown> }>('config/players/get', {
+        player_id: playerId,
+      });
+      const out: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(config?.values ?? {})) {
+        out[key] = entry && typeof entry === 'object' && 'value' in entry ? (entry as { value: unknown }).value : entry;
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Remove a (disconnected) player's configuration from Music Assistant
+   */
+  async removePlayerConfig(playerId: string): Promise<void> {
+    await this.sendCommand('config/players/remove', { player_id: playerId });
+  }
+
   // ==================== Private Methods ====================
 
   private buildWebSocketUrl(serverUrl: string): string {
-    // Remove trailing slash
-    let url = serverUrl.replace(/\/$/, '');
-
-    // Add protocol if missing
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `http://${url}`;
-    }
-
-    // Parse URL
-    const parsed = new URL(url);
-
-    // Build WebSocket URL
-    // If current page is HTTPS, we MUST use WSS (browser security requirement)
-    // Otherwise, use the protocol based on the server URL
-    const isPageSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
-    const wsProtocol = isPageSecure || parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${wsProtocol}//${parsed.host}/ws`;
+    return buildMaWebSocketUrl(serverUrl, '/ws');
   }
 
   private handleMessage(data: string): void {
     try {
       const message = JSON.parse(data);
-      console.log('[MA] Received:', message);
 
       // Handle response to pending request
       if (message.message_id && this.pendingRequests.has(message.message_id)) {
@@ -464,7 +516,6 @@ export class MAWebSocketClient {
 
       // Handle event
       if (message.event) {
-        console.log('[MA] Event:', message.event, message.data);
         const handlers = this.eventHandlers.get(message.event);
         if (handlers) {
           handlers.forEach((handler) => handler(message));
@@ -496,7 +547,7 @@ export class MAWebSocketClient {
 
     setTimeout(() => {
       if (this.shouldReconnect && this.serverUrl) {
-        this.connect(this.serverUrl).catch((error) => {
+        this.connect(this.serverUrl, true).catch((error) => {
           console.error('[MA] Reconnect failed:', error);
         });
       }

@@ -15,3 +15,7 @@ export type { ClockSyncStatus, TimeSyncMeasurement } from './ClockSynchronizer';
 
 export { SendspinSyncClient, createSendspinSyncClient } from './SendspinSyncClient';
 export type { SendspinSyncState } from './SendspinSyncClient';
+
+export { MicRecorder } from './MicRecorder';
+export { detectClicks, analyzeRooms, indexClicks } from './ClickAnalyzer';
+export type { DetectedClick, RoomWindow, RoomAnalysis, AnalysisResult } from './ClickAnalyzer';

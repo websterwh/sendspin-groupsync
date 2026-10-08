@@ -1,0 +1,27 @@
+name: GroupSync
+version: "0.1.0"
+slug: groupsync
+description: Measure and correct sync between Music Assistant players using your phone's microphone
+url: https://github.com/websterwh/sendspin-groupsync
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:speaker-multiple
+panel_title: GroupSync
+ports:
+  5174/tcp: 5174
+ports_description:
+  5174/tcp: Click track for Music Assistant (plain HTTP)
+options:
+  ma_url: ""
+  ma_token: ""
+  media_host: ""
+schema:
+  ma_url: str?
+  ma_token: password?
+  media_host: str?
