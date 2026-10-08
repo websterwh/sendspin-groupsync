@@ -82,7 +82,9 @@ export class MuteController {
     );
     const hardNames = new Set(hard.map((h) => h.name));
     const unconfirmed = await this.confirm(this.rooms.filter((r) => mutedIds.has(r.playerId) && !hardNames.has(r.name)));
-    this.report([...hard, ...unconfirmed]);
+    // A speaker that should be playing but still shows as muted (Sonos over AirPlay sometimes ignores the unmute)
+    const stuckMuted = await this.ensureUnmuted(this.rooms.filter((r) => !mutedIds.has(r.playerId)));
+    this.report([...hard, ...unconfirmed, ...stuckMuted]);
     return hard;
   }
 
@@ -97,6 +99,46 @@ export class MuteController {
         })
       )
     );
+    // Check the speakers that were playing before are playing again, and try once more if not
+    const shouldBePlaying = this.rooms.filter((r) => !r.muted);
+    const stuck = await this.ensureUnmuted(shouldBePlaying, 'still muted after the test');
+    if (stuck.length) this.report(stuck);
+  }
+
+  /**
+   * Make sure these rooms show as unmuted: look, send the unmute again once if any still show muted, look again.
+   * Returns the ones that stay muted, as problems.
+   */
+  private async ensureUnmuted(rooms: MuteRoom[], what = "wouldn't unmute"): Promise<MuteProblem[]> {
+    if (rooms.length === 0) return [];
+    let stuck = await this.stillMuted(rooms);
+    if (stuck.length === 0) return [];
+    await Promise.all(stuck.map((r) => maClient.playerCommand(r.playerId, 'volume_mute', { muted: false }).catch(() => undefined)));
+    stuck = await this.stillMuted(stuck);
+    return stuck.map((r) => ({ name: r.name, reason: `${what}: unmute it in Music Assistant`, hard: true }));
+  }
+
+  /** Rooms that Music Assistant still shows as muted after a short wait (nothing reported counts as fine) */
+  private async stillMuted(rooms: MuteRoom[]): Promise<MuteRoom[]> {
+    let pending = rooms;
+    const deadline = Date.now() + 2500;
+    await sleep(400);
+    while (pending.length > 0) {
+      const checked = await Promise.all(
+        pending.map(async (r) => {
+          try {
+            const p = await maClient.getPlayer(r.playerId);
+            return (p.volume_muted ?? p.muted) === true ? r : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      pending = checked.filter((r): r is MuteRoom => r !== null);
+      if (pending.length === 0 || Date.now() > deadline) break;
+      await sleep(POLL_MS);
+    }
+    return pending;
   }
 
   /** Wait (up to a few seconds) for MA to show each room as muted. Rooms that don't report are unconfirmed. */

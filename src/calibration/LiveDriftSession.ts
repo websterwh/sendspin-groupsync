@@ -114,6 +114,8 @@ export interface RecorderLike {
 
 /** Two independent halves of the audio must agree at least this well on the room's echo pattern */
 export const LEARN_AGREEMENT = 0.7;
+/** The least agreement accepted when it has stopped improving */
+const LEARN_PLATEAU_MIN = 0.55;
 const MUSIC_LEVEL = 0.002;
 /**
  * Gaps below this are hard to tell from room reflections and the music's own bass notes, which make
@@ -347,6 +349,7 @@ export class LiveDriftSession {
     let count = 0;
     let lastCheck = 0;
     let agreement = 0;
+    const trail: { at: number; a: number }[] = [];
     const began = Date.now();
     const emitProgress = (state: LearnProgress['state']) =>
       this.emit({
@@ -384,7 +387,13 @@ export class LiveDriftSession {
         if (f && h0 && h1) {
           agreement = curveCorrelation(h0.strength, h1.strength);
           const flat = full.frames >= 24 && maxStrength(f) < 6.5 && maxStrength(h0) < 8 && maxStrength(h1) < 8;
-          if (agreement >= LEARN_AGREEMENT || flat) {
+          // Real music often levels off a little below the target and never gets further: when it has stopped
+          // improving for 10 s at a reasonable level, that is as good as it gets
+          const elapsedS = (Date.now() - began) / 1000;
+          trail.push({ at: elapsedS, a: agreement });
+          const tenAgo = [...trail].reverse().find((t) => elapsedS - t.at >= 10);
+          const plateau = elapsedS >= 20 && agreement >= LEARN_PLATEAU_MIN && !!tenAgo && agreement - tenAgo.a < 0.02;
+          if (agreement >= LEARN_AGREEMENT || flat || plateau) {
             emitProgress(flat && agreement < LEARN_AGREEMENT ? 'flat' : 'stable');
             return { curve: f, energy: count ? sumSq / count : 0 };
           }
@@ -521,6 +530,7 @@ export class LiveDriftSession {
       return [eA, eB];
     }
 
+    const stuck = new Set<string>(); // speakers whose volume Music Assistant can't change
     for (let attempt = 0; attempt < 3 && this.running && !this.skipBaseline; attempt++) {
       const diffDb = 10 * Math.log10((eB + 1e-12) / (eA + 1e-12)); // > 0: B is louder
       if (Math.abs(diffDb) < 1.5) {
@@ -536,10 +546,10 @@ export class LiveDriftSession {
       // Raise the quieter speaker within its allowance, otherwise lower the louder one
       let target = quiet;
       let newVol = Math.min(100, q.current + wantSteps, q.orig + MAX_STEPS);
-      if (newVol <= q.current) {
+      if (newVol <= q.current || stuck.has(quiet.playerId)) {
         target = loud;
         newVol = Math.max(LOWER_FLOOR(l.orig), l.current - wantSteps);
-        if (newVol >= l.current) {
+        if (newVol >= l.current || stuck.has(loud.playerId)) {
           note(`Couldn't match the volumes (${Math.abs(diffDb).toFixed(1)} dB apart; adjustment limit reached).`, true);
           return [eA, eB];
         }
@@ -548,7 +558,11 @@ export class LiveDriftSession {
       const before = entry.current;
       note(`Matching volume: ${target.name} ${before} → ${newVol} (${Math.abs(diffDb).toFixed(1)} dB apart)…`);
 
-      if (!(await this.setVolume(target, newVol))) return [eA, eB];
+      if (!(await this.setVolume(target, newVol))) {
+        // Some devices (a TV box, say) only take their volume from the device itself: try the other speaker instead
+        stuck.add(target.playerId);
+        continue;
+      }
 
       // Listen to the adjusted speaker alone to see what the change did
       const others = [this.a, this.b, ...this.others].filter((r) => r.playerId !== target.playerId);
@@ -605,7 +619,7 @@ export class LiveDriftSession {
       applied = v === undefined || Math.abs(v - volume) <= 1;
     }
     if (!applied) {
-      note(`${room.name}'s volume didn't change. Volume matching turned off.`);
+      note(`${room.name}'s volume didn't change (it may only take its volume from the device itself).`);
       return false;
     }
     this.volumes.get(room.playerId)!.current = volume;
@@ -618,7 +632,7 @@ export class LiveDriftSession {
         await maClient.sendCommand('players/cmd/volume_set', { player_id: room.playerId, volume_level: targetBefore ?? volume }).catch(() => undefined);
         await maClient.sendCommand('players/cmd/volume_set', { player_id: r.playerId, volume_level: expected }).catch(() => undefined);
         this.volumes.get(room.playerId)!.current = targetBefore ?? volume;
-        note(`Music Assistant applied the volume change to ${r.name} too (group volume). Volume matching turned off.`);
+        note(`Music Assistant applied the volume change to ${r.name} too (group volume).`);
         return false;
       }
     }
