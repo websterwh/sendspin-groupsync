@@ -144,6 +144,7 @@ export class CalibrationSession {
     this.heardTimes.clear();
 
     try {
+      await this.mutes.refresh();
       await this.recorder.start();
       this.emit({ type: 'started' });
 

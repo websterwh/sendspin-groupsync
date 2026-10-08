@@ -180,7 +180,12 @@ export class LiveDriftSession {
       minStrength: options.minStrength ?? 12,
       matchVolume: options.matchVolume ?? true,
     };
-    for (const room of [a, b, ...others]) {
+  }
+
+  /** The volumes to put back at the end, as Music Assistant shows them now */
+  private rememberVolumes(): void {
+    this.volumes.clear();
+    for (const room of [this.a, this.b, ...this.others]) {
       if (typeof room.volume === 'number') this.volumes.set(room.playerId, { orig: room.volume, current: room.volume });
     }
   }
@@ -221,6 +226,8 @@ export class LiveDriftSession {
     this.callback = callback;
     this.running = true;
     try {
+      await this.mutes.refresh();
+      this.rememberVolumes();
       await this.recorder.start();
       await this.waitForMusic();
       if (this.running && !this.skipBaseline) await this.learnRoom();

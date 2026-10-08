@@ -165,6 +165,7 @@ export class SongSession {
     this.running = true;
     try {
       this.setStage('starting');
+      await this.mutes.refresh();
       await this.recorder.start();
       const sr = this.recorder.sampleRate;
       // Room noise before anything plays: speakers must stand clearly above it

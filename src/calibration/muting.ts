@@ -15,6 +15,8 @@ export interface MuteRoom {
   name: string;
   /** Mute state before the test; restored afterwards */
   muted?: boolean;
+  /** Volume (0-100) before the test, where the session keeps track of it */
+  volume?: number;
 }
 
 export interface MuteProblem {
@@ -41,6 +43,25 @@ export class MuteController {
   constructor(rooms: MuteRoom[], onProblems: (problems: MuteProblem[]) => void) {
     this.rooms = rooms;
     this.onProblems = onProblems;
+  }
+
+  /**
+   * Read each room's mute state and volume as Music Assistant shows them right now. The player list the
+   * page holds can be old (a speaker unmuted by hand since, say), and "restore" would then put it back wrongly.
+   */
+  async refresh(): Promise<void> {
+    await Promise.all(
+      this.rooms.map(async (room) => {
+        try {
+          const p = await maClient.getPlayer(room.playerId);
+          const muted = p.volume_muted ?? p.muted;
+          if (typeof muted === 'boolean') room.muted = muted;
+          if (typeof p.volume_level === 'number') room.volume = p.volume_level;
+        } catch {
+          // keep what we were given
+        }
+      })
+    );
   }
 
   /** Mute exactly the rooms in `mutedIds` and unmute the rest. Resolves with the hard failures. */
